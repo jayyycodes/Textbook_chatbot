@@ -270,7 +270,7 @@ app.post('/search', async (req, res) => {
                 PYTHONUNBUFFERED: '1',
                 PYTHONIOENCODING: 'utf-8'
             },
-            timeout: 30000
+            timeout: 100000
         });
 
         let stdout = '';
@@ -700,7 +700,7 @@ app.post('/search/answer', async (req, res) => {
                     pythonProcess.kill('SIGTERM');
                     reject({ success: false, error: 'Search timeout' });
                 }
-            }, 30000);
+            }, 50000);
         });
 
         const searchJsonResult = extractJsonFromOutput(searchResult.output);

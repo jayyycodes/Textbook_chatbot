@@ -113,7 +113,7 @@ const getCurrentFeaturedQueries = () => {
                 <BookOpen className="text-white" size={24} />
               </div>
               <div>
-                <h1 className={`text-xl font-bold ${themeClasses.text}`}>Textbook AI</h1>
+                <h1 className={`text-xl font-bold ${themeClasses.text}`}>LearnLens</h1>
                 <p className={`text-xs ${themeClasses.textMuted}`}>Smart Search Assistant</p>
               </div>
             </div>
@@ -343,7 +343,7 @@ const getCurrentFeaturedQueries = () => {
                 <BookOpen size={20} />
               </div>
               <div>
-                <div className="font-bold">Textbook AI</div>
+                <div className="font-bold">LearnLens</div>
                 <div className="text-sm text-gray-400">Smart Search Assistant</div>
               </div>
             </div>
