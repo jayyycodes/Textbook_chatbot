@@ -274,8 +274,8 @@ Examples:
     
     parser.add_argument(
         '--output_prefix',
-        default='intro_ml',
-        help='Output file prefix (default: intro_ml)'
+        default='intro_to_ml',
+        help='Output file prefix (default: intro_to_ml)'
     )
     
     args = parser.parse_args()

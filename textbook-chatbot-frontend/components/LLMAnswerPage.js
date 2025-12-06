@@ -1,6 +1,6 @@
 "use client"
 import React, { useState, useEffect } from 'react';
-import { Search, BookOpen, AlertCircle, RefreshCw, Lightbulb, Zap, Clock, Hash, Moon, Sun, Bot, ChevronDown, ChevronUp, ExternalLink, ArrowLeft, Copy, CheckCircle } from 'lucide-react';
+import { Search, BookOpen, AlertCircle, RefreshCw, Lightbulb, Zap, Clock, Hash, Moon, Sun, Bot, ChevronDown, ChevronUp, ExternalLink, ArrowLeft, Copy, CheckCircle, Sparkles } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
@@ -14,12 +14,12 @@ const LLMAnswerPage = () => {
   const [isDark, setIsDark] = useState(false);
   const [showSources, setShowSources] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [mounted, setMounted] = useState(false);
 
-  const [selectedTextbook, setSelectedTextbook] = useState('intro_ml');// Default textbook
+  const [selectedTextbook, setSelectedTextbook] = useState('intro_to_ml');// Default textbook
   const [availableTextbooks] = useState([
-    { id: 'intro_ml', name: 'Introduction to Machine Learning', description: 'ML algorithms and concepts' },
-    { id: 'computer_networks', name: 'Computer Networks', description: 'Network protocols and systems' },
-    { id: 'economics', name: 'Economics', description: 'Economic principles and theories' }
+    { id: 'intro_to_ml', name: 'Introduction to Machine Learning', description: 'ML algorithms and concepts' },
+    { id: 'computer_networks', name: 'Computer Networks', description: 'Network protocols and systems' }
   ]);
 
   const answerSuggestionsByTextbook = {
@@ -45,7 +45,7 @@ const LLMAnswerPage = () => {
     ],
 
     // Default fallback for any unmapped textbooks
-    'ML': [
+    'intro_to_ml': [
       "What is machine learning and how does it work?",
       "Explain the difference between supervised and unsupervised learning",
       "How do neural networks process information?",
@@ -56,12 +56,14 @@ const LLMAnswerPage = () => {
       "What are the applications of deep learning?"
     ]
   };
-const getCurrentAnswerSuggestions = () => {
-  return answerSuggestionsByTextbook[selectedTextbook] || answerSuggestionsByTextbook['ML'];
-};
+
+  const getCurrentAnswerSuggestions = () => {
+    return answerSuggestionsByTextbook[selectedTextbook] || answerSuggestionsByTextbook['intro_to_ml'];
+  };
 
   // Theme management
   useEffect(() => {
+    setMounted(true);
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme) {
       setIsDark(savedTheme === 'dark');
@@ -100,6 +102,7 @@ const getCurrentAnswerSuggestions = () => {
     setError('');
     setAnswer(null);
     setSearchAttempted(true);
+    setShowSources(false);
 
     try {
       const response = await fetch('http://localhost:5000/search/answer', {
@@ -112,8 +115,6 @@ const getCurrentAnswerSuggestions = () => {
           textbook: textbook  // Add textbook parameter
         }),
       });
-
-      // ... rest of the function remains the same
 
       if (!response.ok) {
         const errorData = await response.json();
@@ -168,150 +169,126 @@ const getCurrentAnswerSuggestions = () => {
     return `${(ms / 1000).toFixed(1)}s`;
   };
 
+  if (!mounted) return null;
+
   const themeClasses = {
-    bg: isDark ? 'bg-gray-900' : 'bg-gradient-to-br from-blue-50 via-white to-indigo-50',
-    cardBg: isDark ? 'bg-gray-800' : 'bg-white',
-    headerBg: isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200',
+    bg: isDark ? 'bg-[#0a0a0a]' : 'bg-[#fafafa]',
     text: isDark ? 'text-gray-100' : 'text-gray-900',
-    textSecondary: isDark ? 'text-gray-300' : 'text-gray-600',
-    textMuted: isDark ? 'text-gray-400' : 'text-gray-500',
-    border: isDark ? 'border-gray-700' : 'border-gray-200',
-    input: isDark ? 'bg-gray-700 border-gray-600 text-gray-100 placeholder-gray-400 focus:ring-blue-400' : 'bg-white border-gray-300 text-black placeholder-gray-500 focus:ring-blue-500',
-    button: isDark ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-600 hover:bg-blue-700',
-    suggestion: isDark ? 'bg-gray-700 hover:bg-gray-600 text-gray-200 hover:text-blue-300 border-gray-600 hover:border-blue-400' : 'bg-gray-50 hover:bg-blue-50 text-gray-700 hover:text-blue-700 border-transparent hover:border-blue-200',
-    statusBg: isDark ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-200',
-    errorBg: isDark ? 'bg-red-900 border-red-700' : 'bg-red-50 border-red-200',
-    warningBg: isDark ? 'bg-yellow-900 border-yellow-700' : 'bg-yellow-50 border-yellow-200',
-    answerBg: isDark ? 'bg-gradient-to-r from-blue-900/20 to-purple-900/20' : 'bg-gradient-to-r from-blue-50 to-purple-50',
-    sourceBg: isDark ? 'bg-gray-700' : 'bg-gray-50'
+    textSecondary: isDark ? 'text-gray-400' : 'text-gray-500',
+    textMuted: isDark ? 'text-gray-500' : 'text-gray-400',
+    cardBg: isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-100',
+    inputBg: isDark ? 'bg-white/5 border-white/10 focus:border-blue-500' : 'bg-white border-gray-200 focus:border-blue-500',
+    accent: 'bg-blue-600',
+    accentHover: 'hover:bg-blue-700',
+    border: isDark ? 'border-white/10' : 'border-gray-100',
+    answerBg: isDark ? 'bg-gradient-to-r from-blue-900/10 to-purple-900/10' : 'bg-gradient-to-r from-blue-50/50 to-purple-50/50',
   };
 
   return (
-    <div className={`min-h-screen ${themeClasses.bg}`}>
-      {/* Header */}
-      <div className={`${themeClasses.headerBg} border-b shadow-sm`}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-3">
-              <Link
-                href="/search"
-                className={`p-2 rounded-lg ${themeClasses.cardBg} ${themeClasses.border} border hover:opacity-80 transition-opacity`}
-              >
-                <ArrowLeft className={themeClasses.textMuted} size={20} />
-              </Link>
-              <div className="p-2 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg">
-                <Bot className="text-white" size={24} />
-              </div>
-              <div>
-                <h1 className={`text-2xl font-bold ${themeClasses.text}`}>AI Answer</h1>
-                <p className={`text-sm ${themeClasses.textMuted}`}>Comprehensive AI-generated answers</p>
-              </div>
-              <div className="flex items-center gap-2 mt-1">
-                <span className={`text-xs ${themeClasses.textMuted}`}>Textbook:</span>
-                <select
-                  value={selectedTextbook}
-                  onChange={(e) => setSelectedTextbook(e.target.value)}
-                  className={`text-xs px-2 py-1 rounded border ${themeClasses.input} ${themeClasses.textSecondary}`}
-                >
-                  {availableTextbooks.map((textbook) => (
-                    <option key={textbook.id} value={textbook.id}>
-                      {textbook.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            </div>
-            <div className="flex items-center gap-4">
-              <Link
-                href={`/search?textbook=${selectedTextbook}`}
-                className={`px-4 py-2 text-sm rounded-lg ${themeClasses.cardBg} ${themeClasses.border} border hover:opacity-80 transition-opacity ${themeClasses.textSecondary} flex items-center gap-2`}
-              >
-                <Search size={16} />
-                Back to Search
-              </Link>
-              <button
-                onClick={toggleTheme}
-                className={`p-2 rounded-lg ${themeClasses.cardBg} ${themeClasses.border} border hover:opacity-80 transition-opacity`}
-                aria-label="Toggle theme"
-              >
-                {isDark ? (
-                  <Sun className="text-yellow-500" size={20} />
-                ) : (
-                  <Moon className={themeClasses.textMuted} size={20} />
-                )}
-              </button>
-            </div>
-          </div>
-        </div>
+    <div className={`min-h-screen flex flex-col transition-colors duration-500 ${themeClasses.bg} relative overflow-hidden`}>
+
+      {/* Abstract Background Elements */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none fixed">
+        <div className={`absolute top-[-20%] left-[-10%] w-[50vw] h-[50vw] rounded-full blur-[120px] opacity-20 animate-pulse ${isDark ? 'bg-blue-900/40' : 'bg-blue-200/60'}`} />
+        <div className={`absolute bottom-[-20%] right-[-10%] w-[50vw] h-[50vw] rounded-full blur-[120px] opacity-20 animate-pulse delay-1000 ${isDark ? 'bg-indigo-900/40' : 'bg-indigo-200/60'}`} />
       </div>
 
+      {/* Navigation */}
+      <nav className="w-full p-6 flex justify-between items-center z-10 sticky top-0 backdrop-blur-md border-b border-transparent">
+        <div className="flex items-center gap-2 cursor-pointer" onClick={() => router.push('/')}>
+          <div className={`p-2 rounded-xl ${isDark ? 'bg-white/10' : 'bg-black/5'}`}>
+            <BookOpen size={20} className={isDark ? 'text-white' : 'text-black'} />
+          </div>
+          <span className={`font-bold text-lg tracking-tight ${themeClasses.text}`}>LearnLens</span>
+        </div>
+
+        <div className="flex items-center gap-4">
+          <Link
+            href={`/search?textbook=${selectedTextbook}`}
+            className={`hidden md:flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all ${isDark ? 'bg-white/10 hover:bg-white/20 text-white' : 'bg-black/5 hover:bg-black/10 text-black'}`}
+          >
+            <Search size={16} />
+            <span>Raw Search</span>
+          </Link>
+          <button
+            onClick={toggleTheme}
+            className={`p-2 rounded-full transition-all duration-300 ${themeClasses.cardBg} backdrop-blur-md border hover:scale-110`}
+          >
+            {isDark ? <Sun size={18} className="text-yellow-400" /> : <Moon size={18} className="text-slate-600" />}
+          </button>
+        </div>
+      </nav>
+
       {/* Main Content */}
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8 z-10">
         <div className="grid lg:grid-cols-12 gap-8">
 
-          {/* Left Sidebar - Search Form & Suggestions */}
-          <div className="lg:col-span-4 xl:col-span-3">
-            <div className="sticky top-8 space-y-6">
+          {/* Sidebar */}
+          <div className="lg:col-span-4 xl:col-span-3 space-y-6">
 
-              {/* Search Form */}
-              <div className={`${themeClasses.cardBg} rounded-xl shadow-sm border ${themeClasses.border} p-6`}>
-                <div className="space-y-4">
-                  <div className="relative">
-                    <Bot className={`absolute left-3 top-1/2 transform -translate-y-1/2 ${themeClasses.textMuted}`} size={20} />
-                    <input
-                      type="text"
-                      value={query}
-                      onChange={(e) => setQuery(e.target.value)}
-                      onKeyPress={(e) => e.key === 'Enter' && handleSearch(e)}
-                      placeholder="Ask a detailed question for AI analysis..."
-                      className={`w-full pl-10 pr-4 py-3 border rounded-lg focus:ring-2 focus:border-transparent text-sm ${themeClasses.input}`}
-                      disabled={loading}
-                    />
-                  </div>
-                  <button
-                    onClick={handleSearch}
-                    disabled={loading || !query.trim()}
-                    className={`w-full px-4 py-3 text-white rounded-lg disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2 font-medium transition-colors bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700`}
+            {/* Search Controls */}
+            <div className={`p-6 rounded-2xl backdrop-blur-xl border ${themeClasses.cardBg} shadow-sm`}>
+              <div className="space-y-4">
+                {/* Textbook Select */}
+                <div>
+                  <label className={`text-xs font-semibold uppercase tracking-wider ${themeClasses.textMuted} mb-2 block`}>Textbook</label>
+                  <select
+                    value={selectedTextbook}
+                    onChange={(e) => setSelectedTextbook(e.target.value)}
+                    className={`w-full px-3 py-2 rounded-lg text-sm outline-none transition-all ${themeClasses.inputBg} ${themeClasses.text}`}
                   >
-                    {loading ? (
-                      <>
-                        <RefreshCw className="animate-spin" size={18} />
-                        Generating Answer...
-                      </>
-                    ) : (
-                      <>
-                        <Bot size={18} />
-                        Get AI Answer
-                      </>
-                    )}
-                  </button>
+                    {availableTextbooks.map((textbook) => (
+                      <option key={textbook.id} value={textbook.id} className="text-black">
+                        {textbook.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* Search Input */}
+                <div className="relative">
+                  <input
+                    type="text"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyPress={(e) => e.key === 'Enter' && handleSearch(e)}
+                    placeholder="Ask a question..."
+                    className={`w-full pl-10 pr-4 py-3 rounded-xl outline-none transition-all ${themeClasses.inputBg} ${themeClasses.text}`}
+                  />
+                  <Bot className={`absolute left-3 top-1/2 -translate-y-1/2 ${themeClasses.textMuted}`} size={18} />
+                </div>
+
+                <button
+                  onClick={handleSearch}
+                  disabled={loading || !query.trim()}
+                  className={`w-full py-3 rounded-xl font-medium text-white transition-all active:scale-95 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2`}
+                >
+                  {loading ? <RefreshCw className="animate-spin" size={18} /> : <Sparkles size={18} />}
+                  <span>Generate Answer</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Suggestions */}
+            {(!searchAttempted || (answer && !loading)) && (
+              <div className={`p-6 rounded-2xl backdrop-blur-xl border ${themeClasses.cardBg} shadow-sm`}>
+                <div className="flex items-center gap-2 mb-4">
+                  <Lightbulb className="text-yellow-500" size={18} />
+                  <h3 className={`font-semibold ${themeClasses.text}`}>Try asking...</h3>
+                </div>
+                <div className="space-y-2">
+                  {getCurrentAnswerSuggestions().map((suggestion, index) => (
+                    <button
+                      key={index}
+                      onClick={() => handleSuggestionClick(suggestion)}
+                      className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors hover:bg-blue-500/10 ${themeClasses.textSecondary} hover:${themeClasses.text}`}
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
                 </div>
               </div>
-
-              {/* Answer Suggestions */}
-              {(!searchAttempted || (answer && !loading)) && (
-                <div className={`${themeClasses.cardBg} rounded-xl shadow-sm border ${themeClasses.border} p-6`}>
-                  <div className="flex items-center gap-2 mb-4">
-                    <Lightbulb className="text-yellow-500" size={18} />
-                    <h3 className={`font-semibold ${themeClasses.text}`}>
-                      {!searchAttempted ? 'Example Questions' : 'Try Another Question'}
-                    </h3>
-                  </div>
-                  <div className="space-y-2">
-                    {getCurrentAnswerSuggestions().map((suggestion, index) => (
-                      <button
-                        key={index}
-                        onClick={() => handleSuggestionClick(suggestion)}
-                        className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors border ${themeClasses.suggestion}`}
-                        disabled={loading}
-                      >
-                        {suggestion}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
+            )}
           </div>
 
           {/* Main Answer Area */}
@@ -319,223 +296,137 @@ const getCurrentAnswerSuggestions = () => {
 
             {/* Search Status */}
             {searchAttempted && !loading && !error && answer && (
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between mb-6 px-2">
                 <div className="flex items-center gap-2">
-                  <Bot className="text-purple-500" size={16} />
+                  <Sparkles className="text-purple-500" size={16} />
                   <span className={`text-sm ${themeClasses.textSecondary}`}>
-                    AI Answer from <span className="font-medium text-purple-600">{availableTextbooks.find(t => t.id === selectedTextbook)?.name}</span> for: <span className={`font-medium ${themeClasses.text}`}>"{query}"</span>
+                    AI Answer for "<span className={`font-bold ${themeClasses.text}`}>{query}</span>"
                   </span>
                 </div>
-                <div className="flex items-center gap-4 text-xs">
-                  {answer.timing && (
-                    <div className={`${themeClasses.textMuted} flex items-center gap-1`}>
-                      <Clock size={12} />
-                      <span>{formatDuration(answer.timing.total_duration)}</span>
-                    </div>
-                  )}
-                  {answer.api_used && (
-                    <div className={`px-2 py-1 rounded-full text-xs ${isDark ? 'bg-green-900 text-green-300' : 'bg-green-100 text-green-700'}`}>
-                      {answer.api_used}
-                    </div>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {/* Error Display */}
-            {error && (
-              <div className={`mb-6 ${themeClasses.cardBg} rounded-xl shadow-sm border ${themeClasses.border} overflow-hidden`}>
-                <div className={`p-6 ${themeClasses.errorBg} border-b`}>
-                  <div className="flex items-start gap-3">
-                    <AlertCircle className="text-red-500 mt-0.5 flex-shrink-0" size={20} />
-                    <div className="flex-1">
-                      <h3 className="font-semibold text-red-800 mb-1">Answer Generation Failed</h3>
-                      <p className="text-red-700 text-sm">{error}</p>
-                    </div>
-                  </div>
-                </div>
-                <div className={`p-4 ${themeClasses.cardBg}`}>
-                  <p className={`text-sm ${themeClasses.textSecondary} mb-2 font-medium`}>Troubleshooting tips:</p>
-                  <ul className={`text-sm ${themeClasses.textSecondary} space-y-1`}>
-                    <li className="flex items-start gap-2">
-                      <span className={themeClasses.textMuted}>•</span>
-                      <span>Make sure the LLM service is configured and running</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <span className={themeClasses.textMuted}>•</span>
-                      <span>Check your API keys and rate limits</span>
-                    </li>
-                    <li className="flex items-start gap-2">
-                      <span className={themeClasses.textMuted}>•</span>
-                      <span>Try a simpler or more focused question</span>
-                    </li>
-                  </ul>
-                </div>
-              </div>
-            )}
-
-            {/* AI Answer Display */}
-            {answer && answer.answer && (
-              <div className={`${themeClasses.cardBg} rounded-xl shadow-lg border ${themeClasses.border} overflow-hidden mb-6`}>
-                {/* Answer Header */}
-                <div className={`p-6 ${themeClasses.answerBg} border-b ${themeClasses.border}`}>
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-start gap-4">
-                      <div className="p-3 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg">
-                        <Bot className="text-white" size={24} />
-                      </div>
-                      <div className="flex-1">
-                        <h2 className={`text-xl font-bold ${themeClasses.text} mb-2`}>AI Generated Answer</h2>
-                        <div className="flex items-center gap-4 text-sm">
-                          <div className={`flex items-center gap-1 ${themeClasses.textMuted}`}>
-                            <Hash size={14} />
-                            <span>{answer.chunks_processed || 0} sources analyzed</span>
-                          </div>
-                          {answer.timing && (
-                            <div className={`flex items-center gap-1 ${themeClasses.textMuted}`}>
-                              <Clock size={14} />
-                              <span>Generated in {formatDuration(answer.timing.llm_duration || 0)}</span>
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                    <button
-                      onClick={handleCopyAnswer}
-                      className={`p-2 rounded-lg ${themeClasses.cardBg} ${themeClasses.border} border hover:opacity-80 transition-opacity flex items-center gap-2`}
-                      title="Copy answer"
-                    >
-                      {copied ? (
-                        <CheckCircle className="text-green-500" size={16} />
-                      ) : (
-                        <Copy className={themeClasses.textMuted} size={16} />
-                      )}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Answer Content */}
-                <div className="p-8">
-                  <div className="prose max-w-none">
-                    <div className={`${themeClasses.text} leading-relaxed text-base lg:text-lg whitespace-pre-wrap`}>
-                      {answer.answer}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Source Materials */}
-            {answer && answer.search_results && answer.search_results.length > 0 && (
-              <div className={`${themeClasses.cardBg} rounded-xl shadow-sm border ${themeClasses.border} overflow-hidden`}>
-                <button
-                  onClick={() => setShowSources(!showSources)}
-                  className={`w-full p-4 flex items-center justify-between ${themeClasses.textSecondary} hover:${isDark ? 'bg-gray-700' : 'bg-gray-50'} transition-colors`}
-                >
-                  <div className="flex items-center gap-2">
-                    <ExternalLink size={16} />
-                    <span className="font-medium">Source Material ({answer.search_results.length} chunks)</span>
-                  </div>
-                  {showSources ? <ChevronUp size={20} /> : <ChevronDown size={20} />}
-                </button>
-
-                {showSources && (
-                  <div className={`border-t ${themeClasses.border} p-4 space-y-3`}>
-                    {answer.search_results.map((chunk, index) => (
-                      <div key={index} className={`p-4 ${themeClasses.sourceBg} rounded-lg`}>
-                        <div className="flex items-center justify-between mb-2">
-                          <div className="flex items-center gap-2">
-                            <div className="flex items-center justify-center w-6 h-6 bg-blue-100 text-blue-600 rounded-full text-xs font-semibold">
-                              {chunk.rank || index + 1}
-                            </div>
-                            <span className={`text-sm ${themeClasses.textMuted}`}>
-                              {chunk.chunk_id || `Chunk ${index + 1}`}
-                            </span>
-                          </div>
-                          <div className="flex items-center gap-2">
-                            {chunk.score && (
-                              <div className="text-xs text-green-700 bg-green-100 px-2 py-1 rounded-full">
-                                {(chunk.score * 100).toFixed(1)}% relevance
-                              </div>
-                            )}
-                            {chunk.word_count && (
-                              <div className={`text-xs ${themeClasses.textMuted} ${isDark ? 'bg-gray-600' : 'bg-gray-200'} px-2 py-1 rounded-full`}>
-                                {chunk.word_count} words
-                              </div>
-                            )}
-                          </div>
-                        </div>
-                        <p className={`text-sm ${themeClasses.textSecondary}`}>
-                          {chunk.preview}
-                        </p>
-                      </div>
-                    ))}
+                {answer.timing && (
+                  <div className={`flex items-center gap-1 text-xs ${themeClasses.textMuted}`}>
+                    <Clock size={12} />
+                    <span>{formatDuration(answer.timing.total_duration)}</span>
                   </div>
                 )}
               </div>
             )}
 
-            {/* Loading State */}
+            {/* Error */}
+            {error && (
+              <div className={`p-6 rounded-2xl border border-red-500/20 bg-red-500/5 mb-6`}>
+                <div className="flex items-center gap-3 text-red-500 mb-2">
+                  <AlertCircle size={20} />
+                  <h3 className="font-semibold">Generation Failed</h3>
+                </div>
+                <p className={`text-sm ${themeClasses.textSecondary}`}>{error}</p>
+              </div>
+            )}
+
+            {/* Loading */}
             {loading && (
-              <div className={`${themeClasses.cardBg} rounded-xl shadow-sm border ${themeClasses.border} p-12`}>
-                <div className="text-center">
-                  <div className="relative w-16 h-16 mx-auto mb-6">
-                    <div className="absolute inset-0 bg-gradient-to-r from-blue-100 to-purple-100 rounded-full animate-ping opacity-75"></div>
-                    <div className="absolute inset-2 bg-gradient-to-r from-blue-600 to-purple-600 rounded-full flex items-center justify-center">
-                      <Bot className="text-white animate-pulse" size={24} />
+              <div className="flex flex-col items-center justify-center py-20">
+                <div className="relative w-16 h-16 mb-6">
+                  <div className="absolute inset-0 rounded-full border-4 border-purple-500/20"></div>
+                  <div className="absolute inset-0 rounded-full border-4 border-purple-500 border-t-transparent animate-spin"></div>
+                </div>
+                <p className={`${themeClasses.textSecondary} animate-pulse`}>Analyzing textbook content...</p>
+              </div>
+            )}
+
+            {/* Answer Display */}
+            {answer && answer.answer && (
+              <div className={`rounded-2xl backdrop-blur-sm border overflow-hidden mb-6 ${themeClasses.cardBg} ${themeClasses.border}`}>
+                {/* Header */}
+                <div className={`p-6 border-b ${themeClasses.border} ${themeClasses.answerBg}`}>
+                  <div className="flex items-start justify-between">
+                    <div className="flex items-center gap-4">
+                      <div className="p-3 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl shadow-lg shadow-purple-500/20">
+                        <Bot className="text-white" size={24} />
+                      </div>
+                      <div>
+                        <h2 className={`text-xl font-bold ${themeClasses.text}`}>AI Analysis</h2>
+                        <div className={`flex items-center gap-2 text-sm ${themeClasses.textMuted}`}>
+                          <span>Based on {answer.chunks_processed || 0} sources</span>
+                        </div>
+                      </div>
                     </div>
+                    <button
+                      onClick={handleCopyAnswer}
+                      className={`p-2 rounded-lg transition-all ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`}
+                      title="Copy answer"
+                    >
+                      {copied ? <CheckCircle className="text-green-500" size={20} /> : <Copy className={themeClasses.textMuted} size={20} />}
+                    </button>
                   </div>
-                  <h3 className={`text-xl font-semibold ${themeClasses.text} mb-3`}>AI is analyzing...</h3>
-                  <div className="space-y-2">
-                    <p className={`${themeClasses.textSecondary} mb-4`}>
-                      Searching relevant content and generating a comprehensive answer
-                    </p>
-                    <div className="flex justify-center space-x-1">
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce"></div>
-                      <div className="w-2 h-2 bg-purple-500 rounded-full animate-bounce" style={{ animationDelay: '0.1s' }}></div>
-                      <div className="w-2 h-2 bg-blue-500 rounded-full animate-bounce" style={{ animationDelay: '0.2s' }}></div>
+                </div>
+
+                {/* Content */}
+                <div className="p-8">
+                  <div className={`prose max-w-none ${isDark ? 'prose-invert' : ''}`}>
+                    <div className={`whitespace-pre-wrap leading-relaxed text-base lg:text-lg ${themeClasses.text}`}>
+                      {answer.answer}
                     </div>
                   </div>
                 </div>
+
+                {/* Sources Toggle */}
+                {answer.search_results && answer.search_results.length > 0 && (
+                  <div className={`border-t ${themeClasses.border}`}>
+                    <button
+                      onClick={() => setShowSources(!showSources)}
+                      className={`w-full p-4 flex items-center justify-between transition-colors ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
+                    >
+                      <div className={`flex items-center gap-2 text-sm font-medium ${themeClasses.textSecondary}`}>
+                        <BookOpen size={16} />
+                        <span>View Source Material</span>
+                      </div>
+                      {showSources ? <ChevronUp size={16} className={themeClasses.textMuted} /> : <ChevronDown size={16} className={themeClasses.textMuted} />}
+                    </button>
+
+                    {showSources && (
+                      <div className={`p-4 space-y-3 ${isDark ? 'bg-black/20' : 'bg-gray-50/50'}`}>
+                        {answer.search_results.map((chunk, index) => (
+                          <div key={index} className={`p-4 rounded-xl border ${themeClasses.cardBg} ${themeClasses.border}`}>
+                            <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center gap-2">
+                                <span className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${isDark ? 'bg-blue-900/50 text-blue-200' : 'bg-blue-100 text-blue-700'}`}>
+                                  {index + 1}
+                                </span>
+                                <span className={`text-xs font-mono ${themeClasses.textMuted}`}>ID: {chunk.chunk_id}</span>
+                              </div>
+                              {chunk.score && (
+                                <span className={`text-xs px-2 py-1 rounded-full ${isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-700'}`}>
+                                  {Math.round(chunk.score * 100)}% match
+                                </span>
+                              )}
+                            </div>
+                            <p className={`text-sm leading-relaxed ${themeClasses.textSecondary}`}>
+                              {chunk.preview}
+                            </p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
             {/* Empty State */}
             {!searchAttempted && !loading && (
-              <div className={`${themeClasses.cardBg} rounded-xl shadow-sm border ${themeClasses.border} p-12`}>
-                <div className="text-center">
-                  <div className="w-20 h-20 bg-gradient-to-r from-blue-100 to-purple-100 rounded-full flex items-center justify-center mx-auto mb-6">
-                    <Bot className="text-blue-600" size={40} />
-                  </div>
-                  <h3 className={`text-2xl font-semibold ${themeClasses.text} mb-3`}>Ready for AI Analysis</h3>
-                  <p className={`${themeClasses.textSecondary} mb-6 max-w-md mx-auto`}>
-                    Ask any question about your textbook content and get a comprehensive, AI-generated answer with source citations
-                  </p>
-                  <div className="max-w-lg mx-auto">
-                    <div className={`${isDark ? 'bg-gray-700' : 'bg-blue-50'} rounded-lg p-4`}>
-                      <h4 className={`font-medium ${themeClasses.text} mb-2`}>How it works:</h4>
-                      <div className="space-y-2 text-sm">
-                        <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 bg-blue-600 text-white rounded-full flex items-center justify-center text-xs">1</div>
-                          <span className={themeClasses.textSecondary}>AI searches relevant content</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 bg-purple-600 text-white rounded-full flex items-center justify-center text-xs">2</div>
-                          <span className={themeClasses.textSecondary}>Analyzes and synthesizes information</span>
-                        </div>
-                        <div className="flex items-center gap-2">
-                          <div className="w-6 h-6 bg-green-600 text-white rounded-full flex items-center justify-center text-xs">3</div>
-                          <span className={themeClasses.textSecondary}>Generates comprehensive answer with sources</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+              <div className="flex flex-col items-center justify-center py-20 text-center opacity-50">
+                <Bot size={64} className={`mb-6 ${themeClasses.textMuted}`} />
+                <h3 className={`text-xl font-semibold mb-2 ${themeClasses.text}`}>Ready to Analyze</h3>
+                <p className={`max-w-md ${themeClasses.textSecondary}`}>
+                  Ask any question about your textbook. AI will analyze the content and provide a comprehensive answer with citations.
+                </p>
               </div>
             )}
+
           </div>
         </div>
-      </div>
+      </main>
     </div>
   );
 };

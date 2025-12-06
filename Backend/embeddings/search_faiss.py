@@ -1,648 +1,1005 @@
 #!/usr/bin/env python3
 """
-Multi-Textbook FAISS Search Script for Textbook Chatbot
-
-This script loads FAISS indices for multiple textbooks and searches for the most 
-relevant textbook chunks based on user queries using semantic similarity.
+search_faiss.py - Complete Single-File RAG Pipeline with Junk Filtering & Relevance Gate
+A production-ready textbook Q&A system with chunking, FAISS indexing, 
+cross-encoder reranking, junk filtering, book relevance check, and dual-mode answer generation (RAW/LLM).
 
 Usage:
-    python search_faiss.py --textbook intro_ml
-    python search_faiss.py --textbook deep_learning --query "What is backpropagation?"
-    python search_faiss.py --textbook intro_ml --query "neural networks" --top_k 3
-    python search_faiss.py --textbook intro_ml --interactive
-    python search_faiss.py --list-textbooks
+    # Index a PDF
+    python search_faiss.py index --pdf textbook.pdf --id intro_to_ml --name "Intro to ML"
+    
+    # Query in RAW mode (direct chunk evidence)
+    python search_faiss.py query --id intro_to_ml --question "What is supervised learning?" --mode raw
+    
+    # Query in LLM mode (rewritten answer)
+    python search_faiss.py query --id intro_to_ml --question "What is supervised learning?" --mode llm
 """
 
-import argparse
-import pickle
-import sys
 import os
+import re
+import sys
 import json
+import pickle
+import logging
+import argparse
+import subprocess
 from pathlib import Path
-from typing import List, Dict, Any, Tuple, Optional
-
-try:
-    import faiss
-except ImportError:
-    print(json.dumps({"error": "faiss is required. Install it with: pip install faiss-cpu"}))
-    sys.exit(1)
-
-try:
-    from sentence_transformers import SentenceTransformer
-except ImportError:
-    print(json.dumps({"error": "sentence-transformers is required. Install it with: pip install sentence-transformers"}))
-    sys.exit(1)
+from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass, asdict
 
 import numpy as np
 
+# Core dependencies
+try:
+    import faiss
+except ImportError:
+    print("ERROR: faiss not installed. Run: pip install faiss-cpu")
+    sys.exit(1)
 
-class MultiTextbookSearcher:
-    """FAISS-based semantic search for multiple textbook collections."""
+try:
+    from sentence_transformers import SentenceTransformer, CrossEncoder
+except ImportError:
+    print("ERROR: sentence-transformers not installed. Run: pip install sentence-transformers")
+    sys.exit(1)
+
+try:
+    import nltk
+    from nltk.tokenize import sent_tokenize
+    try:
+        nltk.data.find('tokenizers/punkt')
+    except LookupError:
+        print("Downloading NLTK punkt tokenizer...")
+        nltk.download('punkt', quiet=True)
+except ImportError:
+    print("ERROR: nltk not installed. Run: pip install nltk")
+    sys.exit(1)
+
+# Optional: PDF extraction
+try:
+    import PyPDF2
+    HAS_PYPDF2 = True
+except ImportError:
+    HAS_PYPDF2 = False
+
+try:
+    import fitz  # PyMuPDF
+    HAS_PYMUPDF = True
+except ImportError:
+    HAS_PYMUPDF = False
+
+# Optional: subprocess for external LLM script
+import subprocess
+HAS_LLM_SCRIPT = Path("llm_answer.py").exists()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# CONFIGURATION
+# =============================================================================
+
+# Heavy embedding models (in order of preference)
+EMBEDDING_MODELS = [
+    "BAAI/bge-large-en-v1.5",  # 1024-dim, excellent for academic content
+    "sentence-transformers/all-mpnet-base-v2",  # 768-dim fallback
+]
+
+# Heavy reranking models (in order of preference)
+RERANKER_MODELS = [
+    "cross-encoder/ms-marco-MiniLM-L-12-v2",  # Fast and good
+    "BAAI/bge-reranker-base",  # Good quality
+    "mixedbread-ai/mxbai-rerank-large-v1",  # Best quality but slow
+]
+
+# LLM models for answer generation (optional)
+LLM_MODELS = [
+    "microsoft/Phi-3-mini-4k-instruct",  # Fast and good
+    "TinyLlama/TinyLlama-1.1B-Chat-v1.0",  # Lightweight
+]
+
+# Chunking parameters
+CHUNK_SIZE_WORDS = 600
+OVERLAP_WORDS = 120
+MIN_CHUNK_WORDS = 80  # Minimum words for valid chunk
+
+# Retrieval parameters
+TOP_K_FAISS = 20
+TOP_K_RERANK = 5
+RERANK_THRESHOLD = 0.60  # Increased to filter out TOC
+BOOK_RELEVANCE_THRESHOLD = 0.40  # Book-level relevance gate
+
+# Directories
+INDICES_DIR = Path("indices")
+INDICES_DIR.mkdir(exist_ok=True)
+
+
+# =============================================================================
+# UTILITY FUNCTIONS
+# =============================================================================
+
+def sigmoid(x):
+    """Apply sigmoid to convert logits to probabilities."""
+    return 1 / (1 + np.exp(-np.clip(x, -500, 500)))
+
+
+def is_junk_chunk(text: str) -> bool:
+    """
+    Detect and filter junk chunks (TOC, copyright, index pages, etc.).
     
-    def __init__(
-        self, 
-        textbook_id: str,
-        model_name: str = "all-MiniLM-L6-v2",
-        json_mode: bool = False,
-        indices_dir: str = "indices"
-    ):
+    Args:
+        text: Chunk text to evaluate
+        
+    Returns:
+        True if chunk is junk, False otherwise
+    """
+    low = text.lower()
+
+    # Obvious markers
+    if re.search(r"\b(table of contents|contents|copyright|all rights reserved|library of congress)\b", low):
+        return True
+
+    # Many short lines = TOC
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) > 8:
+        short_lines = sum(1 for ln in lines if len(ln.split()) <= 6)
+        if short_lines / max(1, len(lines)) > 0.55:
+            return True
+
+    # Numeric-heavy (indexes)
+    tokens = re.split(r"\s+", text)
+    if len(tokens) > 0:
+        numeric_ratio = sum(1 for t in tokens if re.fullmatch(r"[0-9,\.\-%]+", t)) / len(tokens)
+        if numeric_ratio > 0.25:
+            return True
+
+    return False
+
+
+def clean_text(text: str) -> str:
+    """Clean extracted text from PDF artifacts."""
+    if not text:
+        return ""
+    
+    # Remove hyphenated line breaks
+    text = re.sub(r'(\w+)-\s*\n\s*(\w+)', r'\1\2', text)
+    
+    # Remove page numbers
+    text = re.sub(r'^\s*\d+\s*$', '', text, flags=re.MULTILINE)
+    
+    # Fix common OCR errors
+    text = text.replace('ﬁ', 'fi').replace('ﬂ', 'fl')
+    
+    # Normalize whitespace
+    text = re.sub(r' +', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    text = re.sub(r'\t', ' ', text)
+    
+    # Remove stray bullets
+    text = re.sub(r'^[•▪▫○●◦■□]+\s*', '', text, flags=re.MULTILINE)
+    
+    # Filter lines - remove numeric junk and clean
+    lines = []
+    for line in text.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        # Remove lines that are mostly numbers/punctuation (page listings)
+        if re.match(r"^[\d\s\-\.,]{10,}$", line):
+            continue
+        lines.append(line)
+    
+    text = '\n'.join(lines)
+    
+    return text.strip()
+
+
+def extract_text_from_pdf(pdf_path: str) -> str:
+    """Extract text from PDF using available library."""
+    pdf_path = Path(pdf_path)
+    
+    if not pdf_path.exists():
+        raise FileNotFoundError(f"PDF not found: {pdf_path.absolute()}")
+    
+    text = ""
+    
+    # Try PyMuPDF first (better quality)
+    if HAS_PYMUPDF:
+        logger.info("Extracting text using PyMuPDF...")
+        try:
+            doc = fitz.open(str(pdf_path))
+            for page in doc:
+                text += page.get_text()
+            doc.close()
+            logger.info(f"Extracted {len(text)} characters")
+            return clean_text(text)
+        except Exception as e:
+            logger.warning(f"PyMuPDF failed: {e}")
+    
+    # Fallback to PyPDF2
+    if HAS_PYPDF2:
+        logger.info("Extracting text using PyPDF2...")
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                for page in reader.pages:
+                    text += page.extract_text()
+            logger.info(f"Extracted {len(text)} characters")
+            return clean_text(text)
+        except Exception as e:
+            logger.error(f"PyPDF2 failed: {e}")
+    
+    raise RuntimeError("No PDF library available. Install: pip install PyMuPDF or pip install PyPDF2")
+
+
+# =============================================================================
+# CHUNKING
+# =============================================================================
+
+@dataclass
+class Chunk:
+    """Represents a text chunk with metadata."""
+    chunk_id: int
+    text: str
+    word_count: int
+    sentence_count: int
+    start_idx: int
+    end_idx: int
+
+
+def chunk_text(text: str, chunk_size: int = CHUNK_SIZE_WORDS, 
+               overlap: int = OVERLAP_WORDS) -> List[Chunk]:
+    """
+    Chunk text into overlapping segments with complete sentences.
+    
+    Args:
+        text: Input text
+        chunk_size: Target chunk size in words
+        overlap: Overlap size in words
+        
+    Returns:
+        List of Chunk objects
+    """
+    if not text.strip():
+        return []
+    
+    # Sentence tokenization
+    sentences = sent_tokenize(text)
+    
+    if not sentences:
+        return []
+    
+    chunks = []
+    current_words = []
+    current_sentences = []
+    overlap_words = []
+    chunk_id = 0
+    
+    for sent_idx, sentence in enumerate(sentences):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        
+        words = sentence.split()
+        
+        # Check if adding this sentence exceeds chunk size
+        if len(current_words) + len(words) > chunk_size and current_words:
+            # Only save if meets minimum word count
+            if len(current_words) >= MIN_CHUNK_WORDS:
+                chunk_text = ' '.join(current_words)
+                chunks.append(Chunk(
+                    chunk_id=chunk_id,
+                    text=chunk_text,
+                    word_count=len(current_words),
+                    sentence_count=len(current_sentences),
+                    start_idx=sent_idx - len(current_sentences),
+                    end_idx=sent_idx - 1
+                ))
+                chunk_id += 1
+            
+            # Prepare overlap
+            overlap_words = current_words[-overlap:] if len(current_words) > overlap else current_words
+            current_words = overlap_words.copy()
+            
+            # Track sentences in overlap
+            overlap_sent_count = 0
+            word_count = 0
+            for sent in reversed(current_sentences):
+                sent_words = len(sent.split())
+                if word_count + sent_words <= overlap:
+                    word_count += sent_words
+                    overlap_sent_count += 1
+                else:
+                    break
+            
+            current_sentences = current_sentences[-overlap_sent_count:] if overlap_sent_count > 0 else []
+        
+        # Add sentence to current chunk
+        current_words.extend(words)
+        current_sentences.append(sentence)
+    
+    # Add final chunk if meets minimum
+    if current_words and len(current_words) >= MIN_CHUNK_WORDS:
+        chunk_text = ' '.join(current_words)
+        chunks.append(Chunk(
+            chunk_id=chunk_id,
+            text=chunk_text,
+            word_count=len(current_words),
+            sentence_count=len(current_sentences),
+            start_idx=len(sentences) - len(current_sentences),
+            end_idx=len(sentences) - 1
+        ))
+    
+    logger.info(f"Created {len(chunks)} chunks (avg {sum(c.word_count for c in chunks) / max(1, len(chunks)):.0f} words/chunk)")
+    
+    return chunks
+
+
+# =============================================================================
+# EMBEDDING & INDEXING
+# =============================================================================
+
+class EmbeddingIndexer:
+    """Handles embedding generation and FAISS indexing."""
+    
+    def __init__(self, model_name: str = None, device: str = None):
         """
-        Initialize the multi-textbook searcher.
+        Initialize embedder.
         
         Args:
-            textbook_id: ID of the textbook to search (e.g., 'intro_ml', 'deep_learning')
-            model_name: Sentence transformer model name
-            json_mode: If True, suppress all non-JSON output
-            indices_dir: Directory containing FAISS indices and metadata
+            model_name: Specific model or None to auto-select
+            device: 'cpu' or 'cuda'
         """
-        self.textbook_id = textbook_id
         self.model_name = model_name
-        self.json_mode = json_mode
-        self.indices_dir = Path(indices_dir)
+        self.device = device
         
-        # File paths for this textbook
-        self.index_path = self.indices_dir / f"{textbook_id}_index.faiss"
-        self.metadata_path = self.indices_dir / f"{textbook_id}_metadata.pkl"
-        self.config_path = self.indices_dir / f"{textbook_id}_config.json"
+        # Try to load embedding model
+        if model_name:
+            models_to_try = [model_name]
+        else:
+            models_to_try = EMBEDDING_MODELS
         
-        self.index = None
-        self.metadata = None
-        self.config = None
         self.model = None
-        
-        # Load components
-        self._load_config()
-        self._load_index()
-        self._load_metadata()
-        self._load_model()
-        
-        if not self.json_mode:
-            textbook_name = self.config.get('textbook_name', textbook_id)
-            print(f"SUCCESS: Searcher initialized for '{textbook_name}' with {self.index.ntotal} chunks")
-    
-    def _log(self, message: str):
-        """Log message only if not in JSON mode."""
-        if not self.json_mode:
-            print(message)
-    
-    def _load_config(self):
-        """Load textbook configuration."""
-        try:
-            if not self.config_path.exists():
-                error_msg = f"Config file not found: {self.config_path}"
-                if self.json_mode:
-                    print(json.dumps({"error": error_msg, "available_textbooks": self.list_available_textbooks()}))
-                else:
-                    print(f"ERROR: {error_msg}")
-                    self._show_available_textbooks()
-                sys.exit(1)
-            
-            with open(self.config_path, 'r', encoding='utf-8') as f:
-                self.config = json.load(f)
-            
-            self._log(f"SUCCESS: Loaded config for {self.config.get('textbook_name', self.textbook_id)}")
-            
-        except Exception as e:
-            error_msg = f"Loading config failed: {str(e)}"
-            if self.json_mode:
-                print(json.dumps({"error": error_msg}))
-            else:
-                print(f"ERROR: {error_msg}")
-            sys.exit(1)
-    
-    def _load_index(self):
-        """Load FAISS index from file."""
-        try:
-            if not self.index_path.exists():
-                error_msg = f"FAISS index not found: {self.index_path}"
-                if self.json_mode:
-                    print(json.dumps({"error": error_msg, "available_textbooks": self.list_available_textbooks()}))
-                else:
-                    print(f"ERROR: {error_msg}")
-                    self._show_available_textbooks()
-                sys.exit(1)
-            
-            self.index = faiss.read_index(str(self.index_path))
-            self._log(f"SUCCESS: Loaded FAISS index: {self.index_path}")
-            
-        except Exception as e:
-            error_msg = f"Loading FAISS index failed: {str(e)}"
-            if self.json_mode:
-                print(json.dumps({"error": error_msg}))
-            else:
-                print(f"ERROR: {error_msg}")
-            sys.exit(1)
-    
-    def _load_metadata(self):
-        """Load metadata mapping from pickle file."""
-        try:
-            if not self.metadata_path.exists():
-                error_msg = f"Metadata file not found: {self.metadata_path}"
-                if self.json_mode:
-                    print(json.dumps({"error": error_msg, "available_textbooks": self.list_available_textbooks()}))
-                else:
-                    print(f"ERROR: {error_msg}")
-                    self._show_available_textbooks()
-                sys.exit(1)
-            
-            with open(self.metadata_path, 'rb') as file:
-                self.metadata = pickle.load(file)
-            
-            if not isinstance(self.metadata, list):
-                error_msg = "Metadata must be a list"
-                if self.json_mode:
-                    print(json.dumps({"error": error_msg}))
-                else:
-                    print(f"ERROR: {error_msg}")
-                sys.exit(1)
-            
-            self._log(f"SUCCESS: Loaded metadata: {len(self.metadata)} entries")
-            
-        except Exception as e:
-            error_msg = f"Loading metadata failed: {str(e)}"
-            if self.json_mode:
-                print(json.dumps({"error": error_msg}))
-            else:
-                print(f"ERROR: {error_msg}")
-            sys.exit(1)
-    
-    def _load_model(self):
-        """Load sentence transformer model."""
-        try:
-            # Check if config specifies a different model
-            model_from_config = self.config.get('model_name', self.model_name)
-            if model_from_config != self.model_name:
-                self._log(f"INFO: Using model from config: {model_from_config}")
-                self.model_name = model_from_config
-            
-            self._log(f"INFO: Loading model: {self.model_name}")
-            self.model = SentenceTransformer(self.model_name)
-            self._log(f"SUCCESS: Model loaded successfully")
-            
-        except Exception as e:
-            error_msg = f"Loading model failed: {str(e)}"
-            if self.json_mode:
-                print(json.dumps({"error": error_msg, "hint": "Make sure you're using the same model used for indexing"}))
-            else:
-                print(f"ERROR: {error_msg}")
-                print("HINT: Make sure you're using the same model used for indexing")
-            sys.exit(1)
-    
-    def list_available_textbooks(self) -> List[Dict[str, Any]]:
-        """List all available textbooks with their metadata."""
-        textbooks = []
-        
-        if not self.indices_dir.exists():
-            return textbooks
-        
-        # Find all config files
-        for config_file in self.indices_dir.glob("*_config.json"):
+        for model in models_to_try:
             try:
-                textbook_id = config_file.stem.replace("_config", "")
-                
-                with open(config_file, 'r', encoding='utf-8') as f:
-                    config = json.load(f)
-                
-                # Check if corresponding index and metadata files exist
-                index_file = self.indices_dir / f"{textbook_id}_index.faiss"
-                metadata_file = self.indices_dir / f"{textbook_id}_metadata.pkl"
-                
-                if index_file.exists() and metadata_file.exists():
-                    textbooks.append({
-                        "id": textbook_id,
-                        "name": config.get('textbook_name', textbook_id),
-                        "description": config.get('description', 'No description available'),
-                        "chunks": config.get('total_chunks', 'Unknown'),
-                        "created": config.get('created_at', 'Unknown')
-                    })
-            except Exception:
-                continue  # Skip invalid config files
+                logger.info(f"Loading embedding model: {model}")
+                self.model = SentenceTransformer(model, device=device)
+                self.model_name = model
+                self.embedding_dim = self.model.get_sentence_embedding_dimension()
+                logger.info(f"✓ Loaded {model} (dim={self.embedding_dim})")
+                break
+            except Exception as e:
+                logger.warning(f"Failed to load {model}: {e}")
         
-        return sorted(textbooks, key=lambda x: x['name'])
+        if self.model is None:
+            raise RuntimeError("Could not load any embedding model")
     
-    def _show_available_textbooks(self):
-        """Display available textbooks to the user."""
-        textbooks = self.list_available_textbooks()
-        
-        if not textbooks:
-            print("No textbooks found in the indices directory.")
-            print(f"Make sure you have run the indexing script to create indices in: {self.indices_dir}")
-            return
-        
-        print("\nAvailable textbooks:")
-        print("=" * 50)
-        for tb in textbooks:
-            print(f"ID: {tb['id']}")
-            print(f"Name: {tb['name']}")
-            print(f"Chunks: {tb['chunks']}")
-            print(f"Description: {tb['description']}")
-            print("-" * 30)
+    def encode(self, texts: List[str], batch_size: int = 32, 
+               show_progress: bool = True) -> np.ndarray:
+        """Encode texts to embeddings."""
+        embeddings = self.model.encode(
+            texts,
+            batch_size=batch_size,
+            show_progress_bar=show_progress,
+            convert_to_numpy=True,
+            normalize_embeddings=True
+        )
+        return embeddings.astype('float32')
     
-    def search(self, query: str, top_k: int = 5) -> List[Tuple[float, Dict[str, Any]]]:
+    def build_index(self, chunks: List[Chunk], textbook_id: str, 
+                   textbook_name: str) -> Dict:
         """
-        Search for similar chunks using semantic similarity.
+        Build FAISS index from chunks.
+        
+        Returns:
+            Dictionary with index, metadata, centroid, and config
+        """
+        logger.info(f"Encoding {len(chunks)} chunks...")
+        
+        texts = [chunk.text for chunk in chunks]
+        embeddings = self.encode(texts, show_progress=True)
+        
+        # Compute book centroid for relevance gating
+        logger.info("Computing book centroid...")
+        centroid = np.mean(embeddings, axis=0, keepdims=True)
+        centroid = centroid / np.linalg.norm(centroid)  # Normalize
+        centroid = centroid.astype('float32')
+        logger.info(f"✓ Centroid computed: shape {centroid.shape}")
+        
+        logger.info(f"Building FAISS index (dim={embeddings.shape[1]})...")
+        index = faiss.IndexFlatIP(embeddings.shape[1])
+        index.add(embeddings)
+        
+        # Save index
+        index_path = INDICES_DIR / f"{textbook_id}_index.faiss"
+        faiss.write_index(index, str(index_path))
+        logger.info(f"✓ Saved FAISS index: {index_path}")
+        
+        # Save centroid
+        centroid_path = INDICES_DIR / f"{textbook_id}_centroid.npy"
+        np.save(centroid_path, centroid)
+        logger.info(f"✓ Saved centroid: {centroid_path}")
+        
+        # Save metadata
+        metadata = [asdict(chunk) for chunk in chunks]
+        metadata_path = INDICES_DIR / f"{textbook_id}_metadata.pkl"
+        with open(metadata_path, 'wb') as f:
+            pickle.dump(metadata, f)
+        logger.info(f"✓ Saved metadata: {metadata_path}")
+        
+        # Save config
+        config = {
+            'textbook_id': textbook_id,
+            'textbook_name': textbook_name,
+            'model_name': self.model_name,
+            'embedding_dim': self.embedding_dim,
+            'total_chunks': len(chunks),
+            'chunk_size': CHUNK_SIZE_WORDS,
+            'overlap': OVERLAP_WORDS
+        }
+        config_path = INDICES_DIR / f"{textbook_id}_config.json"
+        with open(config_path, 'w') as f:
+            json.dump(config, f, indent=2)
+        logger.info(f"✓ Saved config: {config_path}")
+        
+        return {
+            'index': index,
+            'metadata': metadata,
+            'centroid': centroid,
+            'config': config
+        }
+
+
+# =============================================================================
+# RERANKING
+# =============================================================================
+
+class CrossEncoderReranker:
+    """Cross-encoder reranking with heavy models."""
+    
+    def __init__(self, model_name: str = None, device: str = None):
+        """
+        Initialize reranker.
         
         Args:
-            query: Search query string
+            model_name: Specific model or None to auto-select
+            device: 'cpu' or 'cuda'
+        """
+        self.model_name = model_name
+        self.device = device
+        
+        # Try to load reranker model
+        if model_name:
+            models_to_try = [model_name]
+        else:
+            models_to_try = RERANKER_MODELS
+        
+        self.model = None
+        for model in models_to_try:
+            try:
+                logger.info(f"Loading reranker: {model}")
+                self.model = CrossEncoder(model, device=device)
+                self.model_name = model
+                logger.info(f"✓ Loaded {model}")
+                break
+            except Exception as e:
+                logger.warning(f"Failed to load {model}: {e}")
+        
+        if self.model is None:
+            raise RuntimeError("Could not load any reranker model")
+    
+    def rerank(self, query: str, results: List[Dict], 
+               top_k: int = TOP_K_RERANK) -> Tuple[List[Dict], float]:
+        """
+        Rerank results using cross-encoder.
+        
+        Args:
+            query: Search query
+            results: List of search results with 'text' key
             top_k: Number of top results to return
             
         Returns:
-            List of (distance, metadata) tuples sorted by similarity
+            Tuple of (reranked results with 'rerank_score', best_score)
         """
-        if not query.strip():
-            raise ValueError("Query cannot be empty")
+        if not results:
+            return [], 0.0
         
-        if top_k <= 0:
-            raise ValueError("top_k must be positive")
+        # Prepare pairs
+        pairs = [[query, r['text']] for r in results]
         
-        # Limit top_k to available chunks
-        top_k = min(top_k, len(self.metadata))
+        # Score
+        logger.info(f"Reranking {len(pairs)} results...")
+        scores = self.model.predict(pairs, show_progress_bar=False)
+        
+        # Apply sigmoid if scores are logits (MS-MARCO style)
+        if np.mean(np.abs(scores)) > 5:  # Likely logits
+            scores = sigmoid(scores)
+        
+        # Add scores to results
+        for result, score in zip(results, scores):
+            result['rerank_score'] = float(score)
+        
+        # Sort
+        results.sort(key=lambda x: x['rerank_score'], reverse=True)
+        
+        # Log top scores
+        for i, r in enumerate(results[:5]):
+            logger.info(f"  Rank {i+1}: score={r['rerank_score']:.4f}, chunk_id={r['chunk_id']}")
+        
+        # Get best score
+        best_score = results[0]['rerank_score'] if results else 0.0
+        
+        # Filter by threshold
+        filtered = [r for r in results if r['rerank_score'] >= RERANK_THRESHOLD]
+        
+        if not filtered:
+            logger.warning(f"No results above threshold {RERANK_THRESHOLD}")
+            return [], best_score
+        
+        return filtered[:top_k], best_score
+
+
+# =============================================================================
+# ANSWER GENERATION
+# =============================================================================
+
+class AnswerGenerator:
+    """Generate answers in RAW or LLM mode using external llm_answer.py script."""
+    
+    def __init__(self, use_llm: bool = False, llm_script_path: str = "llm_answer.py"):
+        """
+        Initialize answer generator.
+        
+        Args:
+            use_llm: Whether to use LLM for answer generation
+            llm_script_path: Path to external LLM script
+        """
+        self.use_llm = use_llm
+        self.llm_script_path = Path(llm_script_path)
+        
+        if use_llm and not self.llm_script_path.exists():
+            logger.warning(f"LLM script not found: {llm_script_path}")
+            logger.warning("Falling back to RAW mode.")
+            self.use_llm = False
+    
+    def generate_raw_answer(self, chunks: List[Dict], query: str) -> str:
+        """
+        Generate RAW answer by concatenating top chunks.
+        No LLM, no rewriting - just direct evidence.
+        """
+        if not chunks:
+            return "No relevant content found in the textbook."
+        
+        # Combine top chunks without modification
+        answer_parts = []
+        for i, chunk in enumerate(chunks[:3], 1):
+            text = chunk['text'].strip()
+            answer_parts.append(f"[Evidence {i} - Chunk ID: {chunk['chunk_id']}]\n{text}")
+        
+        answer = "\n\n".join(answer_parts)
+        return answer
+    
+    def generate_llm_answer(self, chunks: List[Dict], query: str) -> str:
+        """
+        Generate LLM-enhanced answer using external llm_answer.py script.
+        Calls Together.ai or OpenRouter API via subprocess.
+        """
+        if not chunks:
+            return "No relevant content found in the textbook."
+        
+        if not self.use_llm:
+            return self.generate_raw_answer(chunks, query)
         
         try:
-            # Encode the query
-            query_embedding = self.model.encode([query.strip()])
+            # Prepare chunk texts (top 5 chunks)
+            chunk_texts = [c['text'] for c in chunks[:5]]
             
-            # Search FAISS index
-            distances, indices = self.index.search(
-                query_embedding.astype(np.float32), 
-                top_k
+            # Build command
+            cmd = ["python", str(self.llm_script_path), query] + chunk_texts
+            
+            logger.info("Calling external LLM script...")
+            
+            # Call external script
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=120  # 2 minute timeout
             )
             
-            # Prepare results
-            results = []
-            for distance, idx in zip(distances[0], indices[0]):
-                if idx < len(self.metadata):  # Valid index
-                    metadata = self.metadata[idx].copy()
-                    # Add textbook information to metadata
-                    metadata['textbook_id'] = self.textbook_id
-                    metadata['textbook_name'] = self.config.get('textbook_name', self.textbook_id)
-                    results.append((float(distance), metadata))
+            if result.returncode != 0:
+                logger.error(f"LLM script failed with return code {result.returncode}")
+                logger.error(f"stderr: {result.stderr}")
+                logger.info("Falling back to RAW mode")
+                return self.generate_raw_answer(chunks, query)
             
-            return results
-            
+            # Parse JSON response
+            try:
+                response_data = json.loads(result.stdout)
+                
+                if "error" in response_data:
+                    logger.error(f"LLM API error: {response_data.get('message', 'Unknown error')}")
+                    logger.info("Falling back to RAW mode")
+                    return self.generate_raw_answer(chunks, query)
+                
+                answer = response_data.get('answer', '').strip()
+                api_used = response_data.get('api_used', 'unknown')
+                
+                if answer:
+                    logger.info(f"✓ LLM answer generated via {api_used}")
+                    return answer
+                else:
+                    logger.warning("LLM returned empty answer")
+                    return self.generate_raw_answer(chunks, query)
+                    
+            except json.JSONDecodeError as e:
+                logger.error(f"Failed to parse LLM response: {e}")
+                logger.error(f"stdout: {result.stdout[:500]}")
+                logger.info("Falling back to RAW mode")
+                return self.generate_raw_answer(chunks, query)
+        
+        except subprocess.TimeoutExpired:
+            logger.error("LLM script timeout (120s)")
+            logger.info("Falling back to RAW mode")
+            return self.generate_raw_answer(chunks, query)
+        
         except Exception as e:
-            raise Exception(f"Search failed: {str(e)}")
+            logger.error(f"LLM generation failed: {e}")
+            logger.info("Falling back to RAW mode")
+            return self.generate_raw_answer(chunks, query)
     
-    def format_results_json(
-        self, 
-        results: List[Tuple[float, Dict[str, Any]]], 
-        query: str
-    ) -> Dict[str, Any]:
+    def generate(self, chunks: List[Dict], query: str, use_llm: bool) -> str:
+        """Generate answer based on mode (RAW or LLM)."""
+        if use_llm:
+            return self.generate_llm_answer(chunks, query)
+        else:
+            return self.generate_raw_answer(chunks, query)
+
+
+# =============================================================================
+# SEARCH PIPELINE
+# =============================================================================
+
+class SearchPipeline:
+    """Complete search pipeline with FAISS + reranking + junk filtering."""
+    
+    def __init__(self, textbook_id: str, device: str = None):
         """
-        Format search results as JSON for API responses.
+        Initialize search pipeline.
         
         Args:
-            results: List of (distance, metadata) tuples
-            query: Original query string
+            textbook_id: Textbook identifier
+            device: 'cpu' or 'cuda'
+        """
+        self.textbook_id = textbook_id
+        self.device = device
+        
+        # Load config
+        config_path = INDICES_DIR / f"{textbook_id}_config.json"
+        if not config_path.exists():
+            raise FileNotFoundError(f"Index not found for textbook: {textbook_id}")
+        
+        with open(config_path, 'r') as f:
+            self.config = json.load(f)
+        
+        logger.info(f"Loading index for: {self.config['textbook_name']}")
+        
+        # Load FAISS index
+        index_path = INDICES_DIR / f"{textbook_id}_index.faiss"
+        self.index = faiss.read_index(str(index_path))
+        logger.info(f"✓ Loaded FAISS index: {self.index.ntotal} vectors")
+        
+        # Load centroid (or compute if missing)
+        centroid_path = INDICES_DIR / f"{textbook_id}_centroid.npy"
+        if centroid_path.exists():
+            self.centroid = np.load(centroid_path)
+            logger.info(f"✓ Loaded book centroid: shape {self.centroid.shape}")
+        else:
+            logger.warning(f"Centroid not found. Computing from index...")
+            # Extract all vectors from FAISS index
+            all_vectors = np.zeros((self.index.ntotal, self.index.d), dtype='float32')
+            for i in range(self.index.ntotal):
+                all_vectors[i] = self.index.reconstruct(i)
+            # Compute centroid
+            self.centroid = np.mean(all_vectors, axis=0, keepdims=True)
+            self.centroid = self.centroid / np.linalg.norm(self.centroid)
+            # Save for future use
+            np.save(centroid_path, self.centroid)
+            logger.info(f"✓ Computed and saved centroid: shape {self.centroid.shape}")
+        
+        # Load metadata
+        metadata_path = INDICES_DIR / f"{textbook_id}_metadata.pkl"
+        with open(metadata_path, 'rb') as f:
+            self.metadata = pickle.load(f)
+        logger.info(f"✓ Loaded {len(self.metadata)} chunks")
+        
+        # Initialize components
+        self.embedder = EmbeddingIndexer(
+            model_name=self.config['model_name'],
+            device=device
+        )
+        
+        self.reranker = CrossEncoderReranker(device=device)
+    
+    def check_book_relevance(self, query_embedding: np.ndarray) -> float:
+        """
+        Check if query is relevant to the book.
+        
+        Args:
+            query_embedding: Query embedding (1 x D)
             
         Returns:
-            JSON-serializable dictionary
+            Cosine similarity score with book centroid
         """
+        similarity = np.dot(query_embedding, self.centroid.T)[0, 0]
+        return float(similarity)
+    
+    def search(self, query: str, top_k: int = TOP_K_FAISS) -> Tuple[List[Dict], np.ndarray]:
+        """
+        Search for relevant chunks.
+        
+        Args:
+            query: Search query
+            top_k: Number of results from FAISS
+            
+        Returns:
+            Tuple of (results list, query_embedding)
+        """
+        if not query.strip():
+            return [], None
+        
+        # Encode query
+        logger.info(f"Searching: '{query}'")
+        query_embedding = self.embedder.encode([query], show_progress=False)
+        
+        # Search FAISS
+        scores, indices = self.index.search(query_embedding, top_k)
+        
+        # Prepare results
+        results = []
+        for score, idx in zip(scores[0], indices[0]):
+            if idx < len(self.metadata):
+                chunk = self.metadata[idx]
+                results.append({
+                    'chunk_id': chunk['chunk_id'],
+                    'text': chunk['text'],
+                    'word_count': chunk['word_count'],
+                    'faiss_score': float(score)
+                })
+        
+        logger.info(f"✓ Found {len(results)} results from FAISS")
+        
+        return results, query_embedding
+    
+    def query(self, question: str, mode: str = 'raw') -> Dict:
+        """
+        Complete query pipeline with relevance gating.
+        
+        Args:
+            question: User question
+            mode: 'raw' or 'llm'
+            
+        Returns:
+            Dictionary with answer and metadata
+        """
+        # Search
+        results, query_embedding = self.search(question, top_k=TOP_K_FAISS)
+        
+        # Check book-level relevance FIRST
+        book_relevance = self.check_book_relevance(query_embedding)
+        logger.info(f"Book relevance score: {book_relevance:.4f}")
+        
+        if book_relevance < BOOK_RELEVANCE_THRESHOLD:
+            logger.warning(f"Book relevance {book_relevance:.4f} < threshold {BOOK_RELEVANCE_THRESHOLD}")
+            logger.warning("Query is not relevant to this textbook.")
+            return {
+                'answer': "The textbook does not contain relevant information related to your question.",
+                'textbook_name': self.config['textbook_name'],
+                'question': question,
+                'mode': mode,
+                'book_relevance': book_relevance,
+                'chunks_used': [],
+                'chunk_ids': [],
+                'best_rerank_score': 0.0,
+                'confidence': 'N/A'
+            }
+        
         if not results:
             return {
-                "query": query,
-                "textbook": {
-                    "id": self.textbook_id,
-                    "name": self.config.get('textbook_name', self.textbook_id)
-                },
-                "total_results": 0,
-                "results": [],
-                "message": "No relevant results found for your query."
+                'answer': "No relevant content found in the textbook.",
+                'textbook_name': self.config['textbook_name'],
+                'question': question,
+                'mode': mode,
+                'book_relevance': book_relevance,
+                'chunks_used': [],
+                'chunk_ids': [],
+                'best_rerank_score': 0.0,
+                'confidence': 'Low'
             }
         
-        formatted_results = []
-        for rank, (distance, metadata) in enumerate(results, 1):
-            result_item = {
-                "rank": rank,
-                "score": round(1 / (1 + distance), 4),  # Convert distance to similarity score
-                "distance": round(distance, 4),
-                "chunk_id": metadata.get('chunk_id', 'Unknown'),
-                "content": metadata.get('text', 'No text available'),
-                "word_count": metadata.get('word_count', 0),
-                "textbook_id": metadata.get('textbook_id', self.textbook_id),
-                "textbook_name": metadata.get('textbook_name', self.textbook_id)
+        # Filter junk chunks
+        logger.info("Filtering junk chunks...")
+        filtered_results = []
+        for r in results:
+            if not is_junk_chunk(r['text']):
+                filtered_results.append(r)
+            else:
+                logger.info(f"  Filtered junk chunk id={r['chunk_id']}")
+        
+        if not filtered_results:
+            logger.warning("All retrieved chunks were filtered as junk; using original set.")
+            filtered_results = results
+        else:
+            logger.info(f"✓ Kept {len(filtered_results)} clean chunks (filtered {len(results) - len(filtered_results)} junk)")
+        
+        # Rerank
+        reranked, best_rerank_score = self.reranker.rerank(question, filtered_results, top_k=TOP_K_RERANK)
+        
+        if not reranked:
+            return {
+                'answer': "No relevant content found in the textbook.",
+                'textbook_name': self.config['textbook_name'],
+                'question': question,
+                'mode': mode,
+                'book_relevance': book_relevance,
+                'chunks_used': [],
+                'chunk_ids': [],
+                'best_rerank_score': best_rerank_score,
+                'confidence': 'Low'
             }
-            
-            # Add chapter/section info if available
-            if 'chapter' in metadata:
-                result_item['chapter'] = metadata['chapter']
-            if 'section' in metadata:
-                result_item['section'] = metadata['section']
-            
-            formatted_results.append(result_item)
+        
+        # Classify confidence
+        if best_rerank_score >= 0.75:
+            confidence = 'High'
+        elif best_rerank_score >= 0.65:
+            confidence = 'Medium'
+        else:
+            confidence = 'Low'
+        
+        # Generate answer
+        use_llm = (mode.lower() == 'llm')
+        generator = AnswerGenerator(use_llm=use_llm)
+        answer = generator.generate(reranked, question, use_llm=use_llm)
+        
+        # Extract chunk IDs
+        chunk_ids = [r['chunk_id'] for r in reranked]
         
         return {
-            "query": query,
-            "textbook": {
-                "id": self.textbook_id,
-                "name": self.config.get('textbook_name', self.textbook_id)
-            },
-            "total_results": len(results),
-            "results": formatted_results
+            'answer': answer,
+            'textbook_name': self.config['textbook_name'],
+            'question': question,
+            'mode': mode,
+            'book_relevance': book_relevance,
+            'chunks_used': len(reranked),
+            'chunk_ids': chunk_ids,
+            'best_rerank_score': best_rerank_score,
+            'confidence': confidence
         }
+
+
+# =============================================================================
+# CLI INTERFACE
+# =============================================================================
+
+def cmd_index(args):
+    """Index a PDF textbook."""
+    logger.info("="*70)
+    logger.info("INDEXING PIPELINE")
+    logger.info("="*70)
     
-    def format_results(
-        self, 
-        results: List[Tuple[float, Dict[str, Any]]], 
-        query: str,
-        show_distances: bool = False
-    ) -> str:
-        """
-        Format search results for display (human-readable).
-        
-        Args:
-            results: List of (distance, metadata) tuples
-            query: Original query string
-            show_distances: Whether to show distance scores
-            
-        Returns:
-            Formatted results string
-        """
-        if not results:
-            return "No results found."
-        
-        textbook_name = self.config.get('textbook_name', self.textbook_id)
-        
-        output = []
-        output.append("=" * 60)
-        output.append(f"TEXTBOOK: {textbook_name}")
-        output.append(f"QUERY: \"{query}\"")
-        output.append(f"FOUND: {len(results)} relevant chunks")
-        output.append("=" * 60)
-        
-        for rank, (distance, metadata) in enumerate(results, 1):
-            output.append(f"\nRANK {rank}")
-            
-            # Show distance if requested
-            if show_distances:
-                output.append(f"DISTANCE: {distance:.4f}")
-                output.append(f"SIMILARITY: {1/(1+distance):.4f}")
-            
-            # Show chunk ID and word count
-            chunk_id = metadata.get('chunk_id', 'Unknown')
-            word_count = metadata.get('word_count', 'Unknown')
-            output.append(f"ID: {chunk_id} | WORDS: {word_count}")
-            
-            # Show chapter/section if available
-            chapter = metadata.get('chapter')
-            section = metadata.get('section')
-            if chapter or section:
-                location = []
-                if chapter:
-                    location.append(f"Chapter: {chapter}")
-                if section:
-                    location.append(f"Section: {section}")
-                output.append(f"LOCATION: {' | '.join(location)}")
-            
-            # Show chunk text with proper formatting
-            text = metadata.get('text', 'No text available')
-            # Truncate very long texts for readability
-            if len(text) > 500:
-                text = text[:500] + "..."
-            
-            output.append("TEXT:")
-            output.append(f"   {text}")
-            
-            # Add separator between results
-            if rank < len(results):
-                output.append("-" * 40)
-        
-        return "\n".join(output)
-
-
-def interactive_search(searcher: MultiTextbookSearcher, default_top_k: int = 5):
-    """Run interactive search mode."""
-    textbook_name = searcher.config.get('textbook_name', searcher.textbook_id)
+    # Extract text
+    if args.pdf:
+        text = extract_text_from_pdf(args.pdf)
+    elif args.text:
+        with open(args.text, 'r', encoding='utf-8') as f:
+            text = f.read()
+        text = clean_text(text)
+    else:
+        logger.error("Must provide --pdf or --text")
+        sys.exit(1)
     
-    print(f"\nINTERACTIVE: {textbook_name} Search")
-    print("=" * 50)
-    print(f"Ask questions about '{textbook_name}'!")
-    print("Commands:")
-    print("  - 'quit' or 'exit' to stop")
-    print("  - 'help' for more options")
-    print("=" * 50)
+    if not text.strip():
+        logger.error("Extracted text is empty")
+        sys.exit(1)
     
-    while True:
-        try:
-            # Get user input
-            query = input("\nQUESTION: ").strip()
-            
-            # Handle special commands
-            if query.lower() in ['quit', 'exit', 'q']:
-                print("GOODBYE!")
-                break
-            
-            if query.lower() == 'help':
-                print("\nHELP:")
-                print(f"  - Ask questions about {textbook_name}")
-                print("  - Examples: 'What is overfitting?', 'neural network types'")
-                print("  - Type 'quit' to exit")
-                continue
-            
-            if not query:
-                print("WARNING: Please enter a question.")
-                continue
-            
-            # Perform search
-            print("SEARCHING...")
-            results = searcher.search(query, default_top_k)
-            
-            # Display results
-            formatted_results = searcher.format_results(results, query, show_distances=True)
-            print(formatted_results)
-            
-        except KeyboardInterrupt:
-            print("\nGOODBYE!")
-            break
-        except Exception as e:
-            print(f"ERROR: {str(e)}")
-
-
-def list_textbooks_command(indices_dir: str = "indices", json_output: bool = False):
-    """List all available textbooks."""
-    # Create a temporary searcher just to list textbooks
-    searcher = MultiTextbookSearcher(
-        textbook_id="dummy",
-        json_mode=json_output,
-        indices_dir=indices_dir
+    logger.info(f"Extracted {len(text)} characters")
+    
+    # Chunk
+    chunks = chunk_text(text, chunk_size=CHUNK_SIZE_WORDS, overlap=OVERLAP_WORDS)
+    
+    if not chunks:
+        logger.error("No chunks created")
+        sys.exit(1)
+    
+    # Build index
+    indexer = EmbeddingIndexer(device=args.device)
+    indexer.build_index(
+        chunks=chunks,
+        textbook_id=args.id,
+        textbook_name=args.name or args.id
     )
     
-    textbooks = searcher.list_available_textbooks()
+    logger.info("="*70)
+    logger.info("✓ INDEXING COMPLETE")
+    logger.info("="*70)
+
+
+def cmd_query(args):
+    """Query a textbook."""
+    logger.info("="*70)
+    logger.info("QUERY PIPELINE")
+    logger.info("="*70)
     
-    if json_output:
-        print(json.dumps({"textbooks": textbooks}, indent=2))
-    else:
-        if not textbooks:
-            print("No textbooks found.")
-            print(f"Make sure you have run the indexing script to create indices in: {indices_dir}")
-        else:
-            print("Available textbooks:")
-            print("=" * 50)
-            for tb in textbooks:
-                print(f"ID: {tb['id']}")
-                print(f"Name: {tb['name']}")
-                print(f"Chunks: {tb['chunks']}")
-                print(f"Description: {tb['description']}")
-                print(f"Created: {tb['created']}")
-                print("-" * 30)
+    # Initialize pipeline
+    pipeline = SearchPipeline(textbook_id=args.id, device=args.device)
+    
+    # Query
+    result = pipeline.query(args.question, mode=args.mode)
+    
+    # Display
+    print("\n" + "="*70)
+    print(f"TEXTBOOK: {result['textbook_name']}")
+    print(f"QUESTION: {result['question']}")
+    print(f"MODE: {result['mode'].upper()}")
+    print("="*70)
+    print(f"\nBOOK RELEVANCE: {result['book_relevance']:.4f}")
+    print(f"CONFIDENCE: {result['confidence']}")
+    print(f"CHUNKS USED: {result['chunks_used']}")
+    
+    if result['chunk_ids']:
+        # IMPORTANT: Output as proper JSON array string
+        import json as json_module
+        print(f"CHUNK_IDS: {json_module.dumps(result['chunk_ids'])}")
+    
+    if result['best_rerank_score'] > 0:
+        print(f"BEST RERANK SCORE: {result['best_rerank_score']:.4f}")
+    
+    print("\nANSWER:")
+    print("-"*70)
+    print(result['answer'])
+    print("-"*70)
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Search textbook chunks using FAISS and semantic similarity",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  python search_faiss.py --list-textbooks
-  python search_faiss.py --textbook intro_ml --query "What is machine learning?"
-  python search_faiss.py --textbook deep_learning --query "backpropagation" --top_k 3
-  python search_faiss.py --textbook intro_ml --interactive --top_k 10
-  python search_faiss.py --textbook intro_ml --query "test" --json
-        """
+        description="Single-File RAG Pipeline for Textbook Q&A with Junk Filtering & Relevance Gate",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    parser.add_argument(
-        '--textbook', '-t',
-        help='ID of the textbook to search (e.g., intro_ml, deep_learning)'
-    )
+    subparsers = parser.add_subparsers(dest='command', help='Command to run')
     
-    parser.add_argument(
-        '--query', '-q',
-        help='Search query string'
-    )
+    # Index command
+    index_parser = subparsers.add_parser('index', help='Index a textbook')
+    index_parser.add_argument('--pdf', help='Path to PDF file')
+    index_parser.add_argument('--text', help='Path to text file')
+    index_parser.add_argument('--id', required=True, help='Textbook ID')
+    index_parser.add_argument('--name', help='Textbook name')
+    index_parser.add_argument('--device', default=None, help='Device: cpu or cuda')
     
-    parser.add_argument(
-        '--top_k', '-k',
-        type=int,
-        default=5,
-        help='Number of top results to return (default: 5)'
-    )
-    
-    parser.add_argument(
-        '--interactive', '-i',
-        action='store_true',
-        help='Run in interactive mode'
-    )
-    
-    parser.add_argument(
-        '--show_distances',
-        action='store_true',
-        help='Show distance scores in results'
-    )
-    
-    parser.add_argument(
-        '--json',
-        action='store_true',
-        help='Output results in JSON format'
-    )
-    
-    parser.add_argument(
-        '--list-textbooks',
-        action='store_true',
-        help='List all available textbooks'
-    )
-    
-    parser.add_argument(
-        '--indices_dir',
-        default='indices',
-        help='Directory containing FAISS indices and metadata (default: indices)'
-    )
-    
-    parser.add_argument(
-        '--model',
-        default='all-MiniLM-L6-v2',
-        help='Sentence transformer model name (default: all-MiniLM-L6-v2)'
-    )
+    # Query command
+    query_parser = subparsers.add_parser('query', help='Query a textbook')
+    query_parser.add_argument('--id', required=True, help='Textbook ID')
+    query_parser.add_argument('--question', required=True, help='Question to ask')
+    query_parser.add_argument('--mode', default='raw', choices=['raw', 'llm'], 
+                             help='Answer mode: raw (direct chunks) or llm (rewritten)')
+    query_parser.add_argument('--device', default=None, help='Device: cpu or cuda')
     
     args = parser.parse_args()
     
-    # Handle list textbooks command
-    if args.list_textbooks:
-        list_textbooks_command(args.indices_dir, args.json)
-        return 0
+    if not args.command:
+        parser.print_help()
+        sys.exit(1)
     
-    # Validate textbook parameter
-    if not args.textbook:
-        if args.json:
-            print(json.dumps({"error": "Textbook ID is required. Use --textbook parameter or --list-textbooks to see available options."}))
-        else:
-            parser.error("ERROR: Textbook ID is required. Use --textbook parameter or --list-textbooks to see available options.")
-        return 1
-    
-    # Validate arguments
-    if args.top_k <= 0:
-        if args.json:
-            print(json.dumps({"error": "top_k must be positive"}))
-        else:
-            parser.error("ERROR: top_k must be positive")
-        return 1
-    
-    try:
-        # Initialize searcher with JSON mode flag
-        searcher = MultiTextbookSearcher(
-            textbook_id=args.textbook,
-            model_name=args.model,
-            json_mode=args.json,
-            indices_dir=args.indices_dir
-        )
-        
-        # Run appropriate mode
-        if args.interactive:
-            # Interactive mode (never JSON)
-            interactive_search(searcher, args.top_k)
-        
-        elif args.query:
-            # Single query mode
-            if not args.json:
-                textbook_name = searcher.config.get('textbook_name', args.textbook)
-                print(f"INFO: Searching '{textbook_name}' for: \"{args.query}\"")
-            
-            results = searcher.search(args.query, args.top_k)
-            
-            if args.json:
-                # JSON output for API - ONLY output JSON
-                json_results = searcher.format_results_json(results, args.query)
-                print(json.dumps(json_results, indent=2, ensure_ascii=False))
-            else:
-                # Human-readable output
-                formatted_results = searcher.format_results(
-                    results, 
-                    args.query, 
-                    args.show_distances
-                )
-                print(formatted_results)
-        
-        else:
-            # Default: prompt for single query
-            if args.json:
-                print(json.dumps({"error": "No query provided. Use --query parameter for JSON mode."}))
-                return 1
-            
-            textbook_name = searcher.config.get('textbook_name', args.textbook)
-            query = input(f"QUESTION: Enter your question about {textbook_name}: ").strip()
-            
-            if not query:
-                print("WARNING: No query provided. Exiting.")
-                return 1
-            
-            print(f"INFO: Searching '{textbook_name}' for: \"{query}\"")
-            results = searcher.search(query, args.top_k)
-            formatted_results = searcher.format_results(
-                results, 
-                query, 
-                args.show_distances
-            )
-            print(formatted_results)
-        
-        return 0
-    
-    except Exception as e:
-        if args.json:
-            print(json.dumps({"error": str(e)}))
-        else:
-            print(f"ERROR: {str(e)}")
-        return 1
+    if args.command == 'index':
+        cmd_index(args)
+    elif args.command == 'query':
+        cmd_query(args)
 
 
 if __name__ == "__main__":
-    exit(main())
+    main()

@@ -1,82 +1,46 @@
 "use client"
 import React, { useState, useEffect } from 'react';
-import { Search, BookOpen, Zap, Brain, Target, ArrowRight, Sparkles, Clock, Shield, ChevronRight, Moon, Sun } from 'lucide-react';
+import { Search, BookOpen, Sparkles, ArrowRight, Moon, Sun } from 'lucide-react';
 
 const MainPage = () => {
   const [isDark, setIsDark] = useState(false);
-// Default textbook
-const [selectedTextbook, setSelectedTextbook] = useState('intro_ml');
-const featuredQueriesByTextbook = {
-  'computer_networks': [
-    "What is a computer network?",
-    "Explain the OSI model",
-    "What is IP addressing?",
-    "Define packet switching",
-    "What is TCP/IP?",
-    "How does DNS work?"
-  ],
-  'economics': [
-    "What is demand?",
-    "Explain supply and demand",
-    "What is GDP?",
-    "Define inflation",
-    "What are market structures?",
-    "What is opportunity cost?"
-  ],
-  'intro_ml': [
-    "What is machine learning?",
-    "Explain neural networks",
-    "Define supervised learning",
-    "How does classification work?",
-    "What is overfitting?",
-    "Explain feature selection"
-  ]
-};
-const availableTextbooks = [
-  { id: 'intro_ml', name: 'Introduction to Machine Learning', description: 'ML algorithms and concepts' },
-  { id: 'computer_networks', name: 'Computer Networks', description: 'Network protocols and systems' },
-  { id: 'economics', name: 'Economics', description: 'Economic principles and theories' }
-];
-const getCurrentFeaturedQueries = () => {
-  return featuredQueriesByTextbook[selectedTextbook] || featuredQueriesByTextbook['intro_ml'];
-};
-  const features = [
-    {
-      icon: Brain,
-      title: "AI-Powered Search",
-      description: "Advanced semantic search that understands context and meaning, not just keywords"
-    },
-    {
-      icon: Zap,
-      title: "Lightning Fast",
-      description: "Get instant results from your textbook content using optimized FAISS indexing"
-    },
-    {
-      icon: Target,
-      title: "Highly Accurate",
-      description: "Powered by state-of-the-art transformer models for precise content matching"
-    },
-    {
-      icon: Shield,
-      title: "Reliable & Secure",
-      description: "Your searches are processed locally with enterprise-grade reliability"
-    }
+  const [selectedTextbook, setSelectedTextbook] = useState('intro_to_ml');
+  const [mounted, setMounted] = useState(false);
+
+  const featuredQueriesByTextbook = {
+    'computer_networks': [
+      "What is a computer network?",
+      "Explain the OSI model",
+      "What is IP addressing?",
+    ],
+    'intro_to_ml': [
+      "What is machine learning?",
+      "Explain neural networks",
+      "Define supervised learning",
+    ],
+    'economics': [
+      "What is supply and demand?",
+      "Explain opportunity cost",
+      "Define inflation"
+    ]
+  };
+
+  const availableTextbooks = [
+    { id: 'intro_to_ml', name: 'Machine Learning', description: 'ML algorithms' },
+    { id: 'computer_networks', name: 'Computer Networks', description: 'Network protocols' }
   ];
 
-  const stats = [
-    { label: "Search Accuracy", value: "95%+" },
-    { label: "Response Time", value: "<2s" },
-    { label: "Content Coverage", value: "100%" },
-    { label: "Query Types", value: "∞" }
-  ];
+  const getCurrentFeaturedQueries = () => {
+    return featuredQueriesByTextbook[selectedTextbook] || featuredQueriesByTextbook['intro_to_ml'];
+  };
 
   // Theme management
   useEffect(() => {
+    setMounted(true);
     const savedTheme = localStorage.getItem('theme');
     if (savedTheme) {
       setIsDark(savedTheme === 'dark');
     } else {
-      // Check system preference
       setIsDark(window.matchMedia('(prefers-color-scheme: dark)').matches);
     }
   }, []);
@@ -87,301 +51,138 @@ const getCurrentFeaturedQueries = () => {
     localStorage.setItem('theme', newTheme ? 'dark' : 'light');
   };
 
+  if (!mounted) return null;
+
   const themeClasses = {
-    bg: isDark ? 'bg-gray-900' : 'bg-gradient-to-br from-blue-50 via-white to-indigo-100',
-    navBg: isDark ? 'bg-gray-800/80 border-gray-700' : 'bg-white/80 border-gray-200',
-    cardBg: isDark ? 'bg-gray-800' : 'bg-white',
+    bg: isDark ? 'bg-[#0a0a0a]' : 'bg-[#fafafa]',
     text: isDark ? 'text-gray-100' : 'text-gray-900',
-    textSecondary: isDark ? 'text-gray-300' : 'text-gray-600',
-    textMuted: isDark ? 'text-gray-400' : 'text-gray-500',
-    button: isDark ? 'bg-blue-600 hover:bg-blue-700' : 'bg-blue-600 hover:bg-blue-700',
-    buttonSecondary: isDark ? 'bg-gray-700 hover:bg-gray-600 text-gray-200 border-gray-600 hover:border-blue-400' : 'bg-white/80 hover:bg-white text-gray-700 hover:text-blue-600 border-gray-200 hover:border-blue-300',
-    sectionBg: isDark ? 'bg-gray-800' : 'bg-white',
-    sectionBgAlt: isDark ? 'bg-gray-700' : 'bg-gradient-to-r from-gray-50 to-blue-50',
-    footerBg: isDark ? 'bg-gray-900' : 'bg-gray-900'
+    textSecondary: isDark ? 'text-gray-400' : 'text-gray-500',
+    cardBg: isDark ? 'bg-white/5 border-white/10' : 'bg-black/5 border-black/5',
+    accent: 'bg-blue-600',
+    accentHover: 'hover:bg-blue-700',
   };
 
   return (
-    <div className={`min-h-screen ${themeClasses.bg}`}>
+    <div className={`min-h-screen flex flex-col transition-colors duration-500 ${themeClasses.bg} relative overflow-hidden`}>
 
-      {/* Navigation Header */}
-      <nav className={`${themeClasses.navBg} backdrop-blur-sm border-b sticky top-0 z-50`}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between h-16">
-            <div className="flex items-center gap-3">
-              <div className="p-2 bg-gradient-to-r from-blue-600 to-indigo-600 rounded-xl">
-                <BookOpen className="text-white" size={24} />
-              </div>
-              <div>
-                <h1 className={`text-xl font-bold ${themeClasses.text}`}>LearnLens</h1>
-                <p className={`text-xs ${themeClasses.textMuted}`}>Smart Search Assistant</p>
-              </div>
-            </div>
-            <div className="flex items-center gap-3">
-              <button
-                onClick={toggleTheme}
-                className={`p-2 rounded-lg ${themeClasses.cardBg} border ${isDark ? 'border-gray-700' : 'border-gray-200'} hover:opacity-80 transition-opacity`}
-                aria-label="Toggle theme"
-              >
-                {isDark ? (
-                  <Sun className="text-yellow-500" size={20} />
-                ) : (
-                  <Moon className={themeClasses.textMuted} size={20} />
-                )}
-              </button>
-              <button
-                onClick={() => window.location.href = '/search'}
-                className={`px-4 py-2 text-white rounded-lg transition-colors font-medium text-sm flex items-center gap-2 ${themeClasses.button}`}
-              >
-                <Search size={16} />
-                Search Now
-              </button>
-            </div>
+      {/* Abstract Background Elements */}
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
+        <div className={`absolute top-[-20%] left-[-10%] w-[50vw] h-[50vw] rounded-full blur-[120px] opacity-30 animate-pulse ${isDark ? 'bg-blue-900/40' : 'bg-blue-200/60'}`} />
+        <div className={`absolute bottom-[-20%] right-[-10%] w-[50vw] h-[50vw] rounded-full blur-[120px] opacity-30 animate-pulse delay-1000 ${isDark ? 'bg-indigo-900/40' : 'bg-indigo-200/60'}`} />
+      </div>
+
+      {/* Navigation */}
+      <nav className="w-full p-6 flex justify-between items-center z-10">
+        <div className="flex items-center gap-2">
+          <div className={`p-2 rounded-xl ${isDark ? 'bg-white/10' : 'bg-black/5'}`}>
+            <BookOpen size={20} className={isDark ? 'text-white' : 'text-black'} />
           </div>
+          <span className={`font-bold text-lg tracking-tight ${themeClasses.text}`}>LearnLens</span>
         </div>
+        <button
+          onClick={toggleTheme}
+          className={`p-2 rounded-full transition-all duration-300 ${themeClasses.cardBg} backdrop-blur-md border hover:scale-110`}
+        >
+          {isDark ? <Sun size={18} className="text-yellow-400" /> : <Moon size={18} className="text-slate-600" />}
+        </button>
       </nav>
 
-      {/* Hero Section */}
-      <section className="relative overflow-hidden">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-20">
-          <div className="text-center">
+      {/* Main Content */}
+      <main className="flex-1 flex flex-col justify-center items-center px-4 z-10 max-w-5xl mx-auto w-full">
 
+        {/* Hero Text */}
+        <div className="text-center mb-12 space-y-6 animate-fade-in-up">
+          <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-medium border ${themeClasses.cardBg} ${themeClasses.textSecondary} backdrop-blur-sm`}>
+            <Sparkles size={12} />
+            <span>AI-Powered Textbook Assistant</span>
+          </div>
 
-            {/* Badge */}
-            <div className={`inline-flex items-center gap-2 px-4 py-2 ${isDark ? 'bg-blue-900 text-blue-300' : 'bg-blue-100 text-blue-700'} rounded-full text-sm font-medium mb-8`}>
-              <Sparkles size={16} />
-              <span>Powered by Advanced AI Technology</span>
-            </div>
+          <h1 className={`text-5xl md:text-7xl font-bold tracking-tighter ${themeClasses.text}`}>
+            Master your <br />
+            <span className="bg-gradient-to-r from-blue-500 to-indigo-500 bg-clip-text text-transparent">Textbook</span>
+          </h1>
 
-            {/* Main Heading */}
-            <h1 className={`text-5xl md:text-6xl lg:text-7xl font-bold ${themeClasses.text} mb-6 leading-tight`}>
-              Find Answers in Your
-              <span className="bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent"> Textbook</span>
-            </h1>
+          <p className={`text-lg md:text-xl max-w-2xl mx-auto leading-relaxed ${themeClasses.textSecondary}`}>
+            Instant, accurate answers from your study materials. <br className="hidden md:block" />
+            Just ask, and let AI do the searching.
+          </p>
+        </div>
 
-            <p className={`text-xl ${themeClasses.textSecondary} mb-12 max-w-3xl mx-auto leading-relaxed`}>
-              Transform how you study with our AI-powered semantic search. Ask questions in natural language
-              and get precise, contextual answers from your textbook content instantly.
-            </p>
-            {/* Textbook Selector */}
-            <div className="mb-8">
-              <div className={`inline-flex items-center gap-2 px-2 py-2 ${themeClasses.cardBg} rounded-xl border ${themeClasses.border} shadow-sm`}>
-                {availableTextbooks.map((textbook) => (
-                  <button
-                    key={textbook.id}
-                    onClick={() => setSelectedTextbook(textbook.id)}
-                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors ${selectedTextbook === textbook.id
-                        ? 'bg-blue-600 text-white'
-                        : `${themeClasses.textSecondary} hover:${themeClasses.text}`
-                      }`}
-                  >
-                    {textbook.name}
-                  </button>
-                ))}
-              </div>
-              <p className={`text-sm ${themeClasses.textMuted} mt-2 text-center`}>
-                Selected: {availableTextbooks.find(t => t.id === selectedTextbook)?.description}
-              </p>
-            </div>
-            {/* Search CTA Button */}
-            <div className="max-w-lg mx-auto mb-12">
-              <button
-                onClick={() => window.location.href = `/search?textbook=${selectedTextbook}`}
-                className="w-full px-12 py-6 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-2xl hover:from-blue-700 hover:to-indigo-700 transition-all font-bold text-xl flex items-center justify-center gap-3 shadow-xl hover:shadow-2xl transform hover:scale-105"
-              >
-                <Search size={24} />
-                <span>Start Searching Your Textbook</span>
-                <ArrowRight size={24} />
-              </button>
-              <p className={`text-sm ${themeClasses.textMuted} mt-4`}>
-                Click to access our AI-powered search interface
-              </p>
-            </div>
+        {/* Interactive Area */}
+        <div className="w-full max-w-2xl space-y-8 animate-fade-in-up delay-200">
 
-            {/* Featured Queries */}
-            {/* Featured Queries */}
-<div className="mb-16">
-  <p className={`text-sm ${themeClasses.textMuted} mb-4`}>Popular search topics:</p>
-  <div className="flex flex-wrap justify-center gap-3">
-    {getCurrentFeaturedQueries().map((query, index) => (
-      <button
-        key={index}
-        onClick={() => {
-          const searchUrl = `/search?textbook=${selectedTextbook}&q=${encodeURIComponent(query)}`;
-          window.location.href = searchUrl;
-        }}
-        className={`px-4 py-2 rounded-full border transition-all text-sm font-medium hover:shadow-md ${themeClasses.buttonSecondary}`}
-      >
-        {query}
-      </button>
-    ))}
-  </div>
-</div>
-
-
-            {/* Stats */}
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-8 max-w-4xl mx-auto">
-              {stats.map((stat, index) => (
-                <div key={index} className="text-center">
-                  <div className={`text-3xl font-bold ${themeClasses.text} mb-2`}>{stat.value}</div>
-                  <div className={`text-sm ${themeClasses.textSecondary}`}>{stat.label}</div>
-                </div>
+          {/* Textbook Selector */}
+          <div className="flex justify-center">
+            <div className={`inline-flex p-1 rounded-2xl border backdrop-blur-md ${themeClasses.cardBg}`}>
+              {availableTextbooks.map((textbook) => (
+                <button
+                  key={textbook.id}
+                  onClick={() => setSelectedTextbook(textbook.id)}
+                  className={`px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 ${selectedTextbook === textbook.id
+                      ? 'bg-blue-600 text-white shadow-lg'
+                      : `${themeClasses.textSecondary} hover:${themeClasses.text}`
+                    }`}
+                >
+                  {textbook.name}
+                </button>
               ))}
             </div>
           </div>
-        </div>
 
-        {/* Background decoration */}
-        <div className="absolute inset-0 -z-10 overflow-hidden">
-          <div className={`absolute -top-40 -right-40 w-80 h-80 ${isDark ? 'bg-blue-800' : 'bg-blue-400'} rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-blob`}></div>
-          <div className={`absolute -bottom-40 -left-40 w-80 h-80 ${isDark ? 'bg-indigo-800' : 'bg-indigo-400'} rounded-full mix-blend-multiply filter blur-xl opacity-20 animate-blob animation-delay-2000`}></div>
-        </div>
-      </section>
-
-      {/* Features Section */}
-      <section className={`py-20 ${themeClasses.sectionBg}`}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="text-center mb-16">
-            <h2 className={`text-4xl font-bold ${themeClasses.text} mb-4`}>
-              Why Choose Our Search?
-            </h2>
-            <p className={`text-xl ${themeClasses.textSecondary} max-w-3xl mx-auto`}>
-              Experience the next generation of textbook search with cutting-edge AI technology
-            </p>
+          {/* Search Trigger */}
+          <div
+            onClick={() => window.location.href = `/search?textbook=${selectedTextbook}`}
+            className={`group relative w-full p-1 rounded-3xl bg-gradient-to-r from-blue-500/20 to-indigo-500/20 cursor-pointer transition-transform hover:scale-[1.01] duration-300`}
+          >
+            <div className={`relative flex items-center gap-4 p-4 md:p-6 rounded-[20px] ${isDark ? 'bg-gray-900' : 'bg-white'} border ${isDark ? 'border-gray-800' : 'border-gray-100'} shadow-2xl`}>
+              <Search className={`w-6 h-6 ${themeClasses.textSecondary}`} />
+              <div className="flex-1">
+                <span className={`text-lg ${themeClasses.textSecondary} font-light`}>
+                  Ask a question about {availableTextbooks.find(t => t.id === selectedTextbook)?.name}...
+                </span>
+              </div>
+              <div className={`p-3 rounded-xl bg-blue-600 text-white transition-transform group-hover:translate-x-1`}>
+                <ArrowRight size={20} />
+              </div>
+            </div>
           </div>
 
-          <div className="grid md:grid-cols-2 lg:grid-cols-4 gap-8">
-            {features.map((feature, index) => (
-              <div key={index} className="text-center group">
-                <div className={`w-16 h-16 ${isDark ? 'bg-gradient-to-r from-blue-800 to-indigo-800' : 'bg-gradient-to-r from-blue-100 to-indigo-100'} rounded-2xl flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform`}>
-                  <feature.icon className="text-blue-600" size={32} />
-                </div>
-                <h3 className={`text-xl font-semibold ${themeClasses.text} mb-3`}>{feature.title}</h3>
-                <p className={`${themeClasses.textSecondary} leading-relaxed`}>{feature.description}</p>
-              </div>
+          {/* Featured Queries */}
+          <div className="flex flex-wrap justify-center gap-2">
+            {getCurrentFeaturedQueries().map((query, index) => (
+              <button
+                key={index}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  window.location.href = `/search?textbook=${selectedTextbook}&q=${encodeURIComponent(query)}`;
+                }}
+                className={`px-4 py-2 rounded-full text-xs md:text-sm border transition-all duration-300 hover:-translate-y-1 ${themeClasses.cardBg} ${themeClasses.textSecondary} hover:${themeClasses.text} hover:border-blue-500/30`}
+              >
+                {query}
+              </button>
             ))}
           </div>
         </div>
-      </section>
 
-      {/* How It Works Section */}
-      <section className={`py-20 ${themeClasses.sectionBgAlt}`}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="text-center mb-16">
-            <h2 className={`text-4xl font-bold ${themeClasses.text} mb-4`}>
-              How It Works
-            </h2>
-            <p className={`text-xl ${themeClasses.textSecondary}`}>
-              Three simple steps to find exactly what you're looking for
-            </p>
-          </div>
+      </main>
 
-          <div className="grid md:grid-cols-3 gap-8">
-            <div className="text-center">
-              <div className="w-12 h-12 bg-blue-600 text-white rounded-full flex items-center justify-center mx-auto mb-6 text-xl font-bold">
-                1
-              </div>
-              <h3 className={`text-xl font-semibold ${themeClasses.text} mb-3`}>Ask Your Question</h3>
-              <p className={themeClasses.textSecondary}>
-                Type your question in natural language - no need for specific keywords or complex syntax
-              </p>
-            </div>
-
-            <div className="text-center">
-              <div className="w-12 h-12 bg-blue-600 text-white rounded-full flex items-center justify-center mx-auto mb-6 text-xl font-bold">
-                2
-              </div>
-              <h3 className={`text-xl font-semibold ${themeClasses.text} mb-3`}>AI Analyzes Content</h3>
-              <p className={themeClasses.textSecondary}>
-                Our advanced AI understands context and searches through your textbook using semantic similarity
-              </p>
-            </div>
-
-            <div className="text-center">
-              <div className="w-12 h-12 bg-blue-600 text-white rounded-full flex items-center justify-center mx-auto mb-6 text-xl font-bold">
-                3
-              </div>
-              <h3 className={`text-xl font-semibold ${themeClasses.text} mb-3`}>Get Precise Answers</h3>
-              <p className={themeClasses.textSecondary}>
-                Receive ranked results with relevance scores and direct access to the most relevant content
-              </p>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      {/* CTA Section */}
-     <section className="py-20 bg-gradient-to-r from-blue-600 to-indigo-600">
-  <div className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
-    <h2 className="text-4xl font-bold text-white mb-6">
-      Ready to Revolutionize Your Study Experience?
-    </h2>
-    <p className="text-xl text-blue-100 mb-10">
-      Join thousands of students who are already using AI to learn smarter, not harder
-    </p>
-    <button
-      onClick={() => {
-        // Fixed: just go to search page with selected textbook, no undefined query
-        const searchUrl = `/search?textbook=${selectedTextbook}`;
-        window.location.href = searchUrl;
-      }}
-      className="px-10 py-4 bg-white text-blue-600 rounded-xl hover:bg-gray-50 transition-colors font-bold text-lg flex items-center gap-3 mx-auto hover:shadow-xl"
-    >
-      <Search size={24} />
-      <span>Start Searching Now</span>
-      <ChevronRight size={20} />
-    </button>
-  </div>
-</section>
-
-      {/* Footer */}
-      <footer className={`${themeClasses.footerBg} text-white py-12`}>
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col md:flex-row items-center justify-between">
-            <div className="flex items-center gap-3 mb-4 md:mb-0">
-              <div className="p-2 bg-blue-600 rounded-lg">
-                <BookOpen size={20} />
-              </div>
-              <div>
-                <div className="font-bold">LearnLens</div>
-                <div className="text-sm text-gray-400">Smart Search Assistant</div>
-              </div>
-            </div>
-            <div className="flex items-center gap-6 text-sm text-gray-400">
-              <div className="flex items-center gap-2">
-                <Zap size={16} />
-                <span>Powered by FAISS + Transformers</span>
-              </div>
-              <div className="flex items-center gap-2">
-                <Clock size={16} />
-                <span>Available 24/7</span>
-              </div>
-            </div>
-          </div>
-        </div>
+      {/* Minimal Footer */}
+      <footer className="p-6 text-center z-10">
+        <p className={`text-xs ${themeClasses.textSecondary}`}>
+          © {new Date().getFullYear()} LearnLens. Powered by Advanced AI.
+        </p>
       </footer>
 
-      <style jsx>{`
-        @keyframes blob {
-          0% {
-            transform: translate(0px, 0px) scale(1);
-          }
-          33% {
-            transform: translate(30px, -50px) scale(1.1);
-          }
-          66% {
-            transform: translate(-20px, 20px) scale(0.9);
-          }
-          100% {
-            transform: translate(0px, 0px) scale(1);
-          }
+      <style jsx global>{`
+        @keyframes fade-in-up {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
         }
-        .animate-blob {
-          animation: blob 7s infinite;
+        .animate-fade-in-up {
+          animation: fade-in-up 0.8s ease-out forwards;
         }
-        .animation-delay-2000 {
-          animation-delay: 2s;
-        }
+        .delay-1000 { animation-delay: 1s; }
+        .delay-200 { animation-delay: 0.2s; }
       `}</style>
     </div>
   );

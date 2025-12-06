@@ -1,6 +1,6 @@
 {
-  "textbook_id": "Computer_Networks",
-  "textbook_name": "Computer Networks",
+  "textbook_id": "intro_to_ml",
+  "textbook_name": "Computer_Networks",
   "model_name": "BAAI/bge-large-en-v1.5",
   "embedding_dim": 1024,
   "total_chunks": 856,
