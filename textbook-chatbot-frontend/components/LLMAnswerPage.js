@@ -1,432 +1,420 @@
 "use client"
-import React, { useState, useEffect } from 'react';
-import { Search, BookOpen, AlertCircle, RefreshCw, Lightbulb, Zap, Clock, Hash, Moon, Sun, Bot, ChevronDown, ChevronUp, ExternalLink, ArrowLeft, Copy, CheckCircle, Sparkles } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import { Search, BookOpen, AlertCircle, RefreshCw, Lightbulb, Clock, Moon, Sun, Bot, ChevronDown, ChevronUp, ArrowLeft, Copy, CheckCircle, Sparkles, Database, Brain, Zap, Layers } from 'lucide-react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:5000';
+
+// ── Badges ────────────────────────────────────────────────────
+const ConfidenceBadge = ({ confidence }) => {
+  if (!confidence || confidence === 'N/A') return null;
+  const cfg = {
+    High:   { bg: 'rgba(82,183,136,0.12)', color: 'var(--accent-1)',  border: 'rgba(82,183,136,0.25)',  dot: 'var(--accent-1)',  label: 'High Confidence' },
+    Medium: { bg: 'rgba(244,162,97,0.12)',  color: 'var(--warm-1)',   border: 'rgba(244,162,97,0.3)',   dot: 'var(--warm-1)',   label: 'Medium Confidence' },
+    Low:    { bg: 'rgba(220,38,38,0.10)',   color: '#dc2626',          border: 'rgba(220,38,38,0.2)',   dot: '#dc2626',          label: 'Low Confidence' },
+  };
+  const c = cfg[confidence] || cfg.Medium;
+  return (
+    <span style={{ display:'inline-flex', alignItems:'center', gap:'6px', padding:'3px 10px', borderRadius:'100px', fontSize:'0.72rem', fontWeight:600, background:c.bg, color:c.color, border:`1px solid ${c.border}` }}>
+      <span style={{ width:'6px', height:'6px', borderRadius:'50%', background:c.dot, flexShrink:0 }} />
+      {c.label}
+    </span>
+  );
+};
+
+const ModelBadge = ({ apiUsed, model }) => {
+  if (!apiUsed || apiUsed === 'raw') return null;
+  const map = {
+    groq:       { bg:'rgba(82,183,136,0.10)', color:'var(--accent-1)', border:'rgba(82,183,136,0.25)', label:'Groq · Llama 3.3 70B', icon:'⚡' },
+    gemini:     { bg:'rgba(59,130,246,0.10)', color:'#3b82f6',          border:'rgba(59,130,246,0.25)', label:'Gemini 2.0 Flash',     icon:'✦' },
+    'together.ai':{ bg:'rgba(168,85,247,0.10)', color:'#a855f7',        border:'rgba(168,85,247,0.25)', label:'Llama 3.3 70B',        icon:'🦙' },
+    openrouter: { bg:'rgba(244,162,97,0.10)', color:'var(--warm-1)',   border:'rgba(244,162,97,0.3)',  label:'Mistral 7B',           icon:'🔶' },
+  };
+  const key = Object.keys(map).find(k => apiUsed?.toLowerCase().includes(k)) || 'gemini';
+  const b = map[key];
+  return (
+    <span style={{ display:'inline-flex', alignItems:'center', gap:'5px', padding:'3px 10px', borderRadius:'100px', fontSize:'0.72rem', fontWeight:600, background:b.bg, color:b.color, border:`1px solid ${b.border}` }}>
+      {b.icon} {b.label}
+    </span>
+  );
+};
+
+const RetrievalBadge = ({ mode }) => {
+  if (!mode) return null;
+  const hybrid = mode === 'hybrid';
+  return (
+    <span style={{ display:'inline-flex', alignItems:'center', gap:'5px', padding:'3px 10px', borderRadius:'100px', fontSize:'0.72rem', fontWeight:600, background: hybrid ? 'rgba(82,183,136,0.10)' : 'rgba(156,154,148,0.10)', color: hybrid ? 'var(--accent-1)' : 'var(--text-muted)', border:`1px solid ${hybrid ? 'rgba(82,183,136,0.25)' : 'var(--border-base)'}` }}>
+      <Database size={10} />
+      {hybrid ? 'Hybrid BM25+FAISS+RRF' : 'Dense FAISS'}
+    </span>
+  );
+};
+
+const Skeleton = () => (
+  <div style={{ display:'flex', flexDirection:'column', gap:'12px' }}>
+    <div style={{ background:'var(--bg-surface)', border:'1px solid var(--border-base)', borderRadius:'16px', padding:'1.5rem' }}>
+      <div style={{ display:'flex', alignItems:'center', gap:'12px', marginBottom:'1.25rem' }}>
+        <div className="skeleton" style={{ width:'44px', height:'44px', borderRadius:'12px' }} />
+        <div style={{ flex:1, display:'flex', flexDirection:'column', gap:'8px' }}>
+          <div className="skeleton" style={{ height:'14px', width:'120px', borderRadius:'6px' }} />
+          <div className="skeleton" style={{ height:'11px', width:'180px', borderRadius:'6px' }} />
+        </div>
+      </div>
+      {[1,0.85,1,0.7,0.9].map((w,i) => (
+        <div key={i} className="skeleton" style={{ height:'12px', width:`${w*100}%`, borderRadius:'6px', marginBottom:'10px' }} />
+      ))}
+    </div>
+  </div>
+);
+
+// ── Main ──────────────────────────────────────────────────────
 const LLMAnswerPage = () => {
   const router = useRouter();
-  const [query, setQuery] = useState('');
-  const [answer, setAnswer] = useState(null);
+  const [query, setQuery]     = useState('');
+  const [answer, setAnswer]   = useState(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [searchAttempted, setSearchAttempted] = useState(false);
-  const [isDark, setIsDark] = useState(false);
-  const [showSources, setShowSources] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [error, setError]     = useState('');
+  const [searched, setSearched] = useState(false);
+  const [isDark, setIsDark]   = useState(false);
+  const [showSrc, setShowSrc] = useState(true);
+  const [copied, setCopied]   = useState(false);
   const [mounted, setMounted] = useState(false);
-
-  const [selectedTextbook, setSelectedTextbook] = useState('intro_to_ml');// Default textbook
-  const [availableTextbooks] = useState([
-    { id: 'intro_to_ml', name: 'Introduction to Machine Learning', description: 'ML algorithms and concepts' },
-    { id: 'computer_networks', name: 'Computer Networks', description: 'Network protocols and systems' }
+  const [selectedTextbook, setSelectedTextbook] = useState('intro_to_ml');
+  const [availableTextbooks, setAvailableTextbooks] = useState([
+    { id:'intro_to_ml', name:'Introduction to Machine Learning' },
+    { id:'computer_networks', name:'Computer Networks' },
   ]);
+  const [history, setHistory] = useState([]);
 
-  const answerSuggestionsByTextbook = {
-    'computer_networks': [
-      "What is a computer network and how does it work?",
-      "Explain the OSI model and its seven layers in detail",
-      "How does IP addressing work and what are the different types?",
-      "What is packet switching and how does it differ from circuit switching?",
-      "Explain the TCP/IP protocol suite and its importance",
-      "How does DNS work and what is its role in networking?",
-      "What are network protocols and why are they essential?",
-      "Compare different network topologies and their advantages"
-    ],
-    'economics': [
-      "What is demand and how does it affect market prices?",
-      "Explain the law of supply and demand with real-world examples",
-      "What is GDP and how is it calculated and interpreted?",
-      "Define inflation and explain its causes and effects on the economy",
-      "What are market structures and how do they influence competition?",
-      "What is opportunity cost and how does it guide economic decisions?",
-      "Explain economic equilibrium and how markets reach balance",
-      "What is monetary policy and how do central banks use it?"
-    ],
-
-    // Default fallback for any unmapped textbooks
-    'intro_to_ml': [
-      "What is machine learning and how does it work?",
-      "Explain the difference between supervised and unsupervised learning",
-      "How do neural networks process information?",
-      "What are the main types of machine learning algorithms?",
-      "Explain the concept of overfitting in machine learning",
-      "What is feature engineering and why is it important?",
-      "How does gradient descent optimization work?",
-      "What are the applications of deep learning?"
-    ]
+  const suggestions = {
+    computer_networks: ["What is a computer network and how does it work?","Explain the OSI model and its seven layers","How does IP addressing work?","What is packet switching vs circuit switching?","Explain the TCP/IP protocol suite"],
+    intro_to_ml:       ["What is machine learning and how does it work?","Explain supervised vs unsupervised learning","How do neural networks process information?","What is gradient descent optimization?","Explain the concept of overfitting"],
+    economics:         ["Explain supply and demand with examples","What is GDP and how is it calculated?","Define inflation and its causes","What is opportunity cost?","Explain market equilibrium"],
   };
 
-  const getCurrentAnswerSuggestions = () => {
-    return answerSuggestionsByTextbook[selectedTextbook] || answerSuggestionsByTextbook['intro_to_ml'];
-  };
-
-  // Theme management
   useEffect(() => {
     setMounted(true);
-    const savedTheme = localStorage.getItem('theme');
-    if (savedTheme) {
-      setIsDark(savedTheme === 'dark');
-    } else {
-      setIsDark(window.matchMedia('(prefers-color-scheme: dark)').matches);
-    }
+    const saved = localStorage.getItem('theme');
+    const dark = saved ? saved === 'dark' : window.matchMedia('(prefers-color-scheme: dark)').matches;
+    setIsDark(dark);
+    document.documentElement.classList.toggle('dark', dark);
+
+    try { setHistory(JSON.parse(sessionStorage.getItem('learnlens_history') || '[]')); } catch {}
+
+    fetch(`${API_URL}/textbooks`)
+      .then(r => r.json())
+      .then(d => { if (d.textbooks?.length) setAvailableTextbooks(d.textbooks.map(t => ({ id:t.id, name:t.name }))); })
+      .catch(() => {});
+
+    const p = new URLSearchParams(window.location.search);
+    const q = p.get('q'), tb = p.get('textbook');
+    if (tb) setSelectedTextbook(tb);
+    if (q) { setQuery(q); setTimeout(() => performSearch(q, tb || 'intro_to_ml'), 150); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const toggleTheme = () => {
-    const newTheme = !isDark;
-    setIsDark(newTheme);
-    localStorage.setItem('theme', newTheme ? 'dark' : 'light');
+    const next = !isDark;
+    setIsDark(next);
+    localStorage.setItem('theme', next ? 'dark' : 'light');
+    document.documentElement.classList.toggle('dark', next);
   };
 
-  // Extract query from URL and auto-search on component mount
-  useEffect(() => {
-    const urlParams = new URLSearchParams(window.location.search);
-    const queryParam = urlParams.get('q');
-    const textbookParam = urlParams.get('textbook');
-
-    if (textbookParam && availableTextbooks.find(t => t.id === textbookParam)) {
-      setSelectedTextbook(textbookParam);
-    }
-
-    if (queryParam) {
-      setQuery(queryParam);
-      // Wait for textbook to be set before searching
-      setTimeout(() => performSearch(queryParam, textbookParam || selectedTextbook), 100);
-    }
-  }, []);
-
-  const performSearch = async (searchQuery, textbook = selectedTextbook) => {
-    if (!searchQuery || !searchQuery.trim()) return;
-
-    setLoading(true);
-    setError('');
-    setAnswer(null);
-    setSearchAttempted(true);
-    setShowSources(false);
-
+  const performSearch = useCallback(async (q, tb = selectedTextbook) => {
+    if (!q?.trim()) return;
+    setLoading(true); setError(''); setAnswer(null); setSearched(true); setShowSrc(true);
     try {
-      const response = await fetch('http://localhost:5000/search/answer', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          query: searchQuery.trim(),
-          textbook: textbook  // Add textbook parameter
-        }),
+      const r = await fetch(`${API_URL}/search/answer`, {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({ query: q.trim(), textbook: tb }),
       });
-
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || errorData.error || `HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      if (!r.ok) { const e = await r.json(); throw new Error(e.message || e.error || `HTTP ${r.status}`); }
+      const data = await r.json();
       setAnswer(data);
-
-    } catch (err) {
-      console.error('Answer generation error:', err);
-      setError(err.message || 'An unexpected error occurred while generating the answer');
-    } finally {
-      setLoading(false);
-    }
-  };
+      const entry = { query:q.trim(), textbook:tb, ts:Date.now() };
+      setHistory(prev => {
+        const next = [entry, ...prev.filter(h => h.query !== entry.query)].slice(0, 8);
+        sessionStorage.setItem('learnlens_history', JSON.stringify(next));
+        return next;
+      });
+    } catch (e) { setError(e.message || 'Unexpected error'); }
+    finally { setLoading(false); }
+  }, [selectedTextbook]);
 
   const handleSearch = async (e) => {
     if (e) e.preventDefault();
+    if (!query.trim()) return;
     await performSearch(query, selectedTextbook);
-
-    // Update URL with query and textbook parameters
-    if (query.trim()) {
-      const newUrl = `/search/answer?textbook=${selectedTextbook}&q=${encodeURIComponent(query.trim())}`;
-      window.history.pushState({}, '', newUrl);
-    }
+    window.history.pushState({}, '', `/search/answer?textbook=${selectedTextbook}&q=${encodeURIComponent(query.trim())}`);
   };
 
-  const handleSuggestionClick = (suggestion) => {
-    setQuery(suggestion);
-    performSearch(suggestion, selectedTextbook);
-
-    // Update URL
-    const newUrl = `/search/answer?textbook=${selectedTextbook}&q=${encodeURIComponent(suggestion)}`;
-    window.history.pushState({}, '', newUrl);
+  const handleSuggestion = (s) => {
+    setQuery(s);
+    performSearch(s, selectedTextbook);
+    window.history.pushState({}, '', `/search/answer?textbook=${selectedTextbook}&q=${encodeURIComponent(s)}`);
   };
 
-  const handleCopyAnswer = async () => {
-    if (answer && answer.answer) {
-      try {
-        await navigator.clipboard.writeText(answer.answer);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-      } catch (err) {
-        console.error('Failed to copy:', err);
-      }
-    }
-  };
-
-  const formatDuration = (ms) => {
-    if (ms < 1000) return `${ms}ms`;
-    return `${(ms / 1000).toFixed(1)}s`;
+  const handleCopy = async () => {
+    if (!answer?.answer) return;
+    await navigator.clipboard.writeText(answer.answer).catch(() => {});
+    setCopied(true); setTimeout(() => setCopied(false), 2000);
   };
 
   if (!mounted) return null;
 
-  const themeClasses = {
-    bg: isDark ? 'bg-[#0a0a0a]' : 'bg-[#fafafa]',
-    text: isDark ? 'text-gray-100' : 'text-gray-900',
-    textSecondary: isDark ? 'text-gray-400' : 'text-gray-500',
-    textMuted: isDark ? 'text-gray-500' : 'text-gray-400',
-    cardBg: isDark ? 'bg-white/5 border-white/10' : 'bg-white border-gray-100',
-    inputBg: isDark ? 'bg-white/5 border-white/10 focus:border-blue-500' : 'bg-white border-gray-200 focus:border-blue-500',
-    accent: 'bg-blue-600',
-    accentHover: 'hover:bg-blue-700',
-    border: isDark ? 'border-white/10' : 'border-gray-100',
-    answerBg: isDark ? 'bg-gradient-to-r from-blue-900/10 to-purple-900/10' : 'bg-gradient-to-r from-blue-50/50 to-purple-50/50',
+  const currentSuggestions = suggestions[selectedTextbook] || suggestions['intro_to_ml'];
+
+  const S = {
+    nav: { position:'sticky', top:0, zIndex:50, padding:'0 2rem', height:'64px', display:'flex', alignItems:'center', justifyContent:'space-between' },
+    card: { background:'var(--bg-surface)', border:'1px solid var(--border-base)', borderRadius:'16px', padding:'1.25rem', boxShadow:'var(--shadow-sm)' },
+    label: { fontSize:'0.72rem', fontWeight:600, textTransform:'uppercase', letterSpacing:'0.06em', color:'var(--text-muted)', display:'block', marginBottom:'6px' },
+    textarea: { padding:'10px 14px', width:'100%', fontSize:'0.875rem', borderRadius:'10px', border:'1px solid var(--border-base)', background:'var(--bg-elevated)', color:'var(--text-primary)', outline:'none', resize:'none', fontFamily:'inherit', lineHeight:1.6 },
+    select: { padding:'9px 14px', width:'100%', fontSize:'0.875rem', borderRadius:'10px', border:'1px solid var(--border-base)', background:'var(--bg-elevated)', color:'var(--text-primary)', outline:'none', cursor:'pointer' },
   };
 
   return (
-    <div className={`min-h-screen flex flex-col transition-colors duration-500 ${themeClasses.bg} relative overflow-hidden`}>
+    <div style={{ minHeight:'100vh', display:'flex', flexDirection:'column', background:'var(--bg-base)', position:'relative', overflow:'hidden' }}>
 
-      {/* Abstract Background Elements */}
-      <div className="absolute inset-0 overflow-hidden pointer-events-none fixed">
-        <div className={`absolute top-[-20%] left-[-10%] w-[50vw] h-[50vw] rounded-full blur-[120px] opacity-20 animate-pulse ${isDark ? 'bg-blue-900/40' : 'bg-blue-200/60'}`} />
-        <div className={`absolute bottom-[-20%] right-[-10%] w-[50vw] h-[50vw] rounded-full blur-[120px] opacity-20 animate-pulse delay-1000 ${isDark ? 'bg-indigo-900/40' : 'bg-indigo-200/60'}`} />
+      {/* Blobs */}
+      <div style={{ position:'fixed', inset:0, pointerEvents:'none', zIndex:0 }}>
+        <div className="ll-blob-a animate-pulse-soft" style={{ position:'absolute', top:'-20%', left:'-10%', width:'45vw', height:'45vw', opacity:0.45 }} />
+        <div className="ll-blob-b animate-pulse-soft delay-1000" style={{ position:'absolute', bottom:'-20%', right:'-8%', width:'40vw', height:'40vw', opacity:0.35 }} />
       </div>
 
-      {/* Navigation */}
-      <nav className="w-full p-6 flex justify-between items-center z-10 sticky top-0 backdrop-blur-md border-b border-transparent">
-        <div className="flex items-center gap-2 cursor-pointer" onClick={() => router.push('/')}>
-          <div className={`p-2 rounded-xl ${isDark ? 'bg-white/10' : 'bg-black/5'}`}>
-            <BookOpen size={20} className={isDark ? 'text-white' : 'text-black'} />
+      {/* Nav */}
+      <nav className="ll-nav" style={S.nav}>
+        <div style={{ display:'flex', alignItems:'center', gap:'10px', cursor:'pointer' }} onClick={() => router.push('/')}>
+          <div style={{ background:'var(--accent-glow)', border:'1px solid rgba(82,183,136,0.25)', borderRadius:'10px', padding:'8px' }}>
+            <BookOpen size={18} style={{ color:'var(--accent-1)' }} />
           </div>
-          <span className={`font-bold text-lg tracking-tight ${themeClasses.text}`}>LearnLens</span>
+          <span style={{ fontWeight:700, fontSize:'1.05rem', color:'var(--text-primary)', letterSpacing:'-0.02em' }}>LearnLens</span>
         </div>
 
-        <div className="flex items-center gap-4">
-          <Link
-            href={`/search?textbook=${selectedTextbook}`}
-            className={`hidden md:flex items-center gap-2 px-4 py-2 rounded-full text-sm font-medium transition-all ${isDark ? 'bg-white/10 hover:bg-white/20 text-white' : 'bg-black/5 hover:bg-black/10 text-black'}`}
-          >
-            <Search size={16} />
-            <span>Raw Search</span>
+        <div style={{ display:'flex', alignItems:'center', gap:'10px' }}>
+          <Link href={`/search?textbook=${selectedTextbook}`}
+            style={{ display:'flex', alignItems:'center', gap:'6px', padding:'7px 14px', borderRadius:'10px', border:'1px solid var(--border-base)', background:'var(--bg-elevated)', color:'var(--text-secondary)', fontSize:'0.82rem', fontWeight:500, textDecoration:'none' }}>
+            <Search size={13} /> Raw Search
           </Link>
-          <button
-            onClick={toggleTheme}
-            className={`p-2 rounded-full transition-all duration-300 ${themeClasses.cardBg} backdrop-blur-md border hover:scale-110`}
-          >
-            {isDark ? <Sun size={18} className="text-yellow-400" /> : <Moon size={18} className="text-slate-600" />}
+          <button onClick={toggleTheme} style={{ padding:'8px', borderRadius:'10px', border:'1px solid var(--border-base)', background:'var(--bg-elevated)', cursor:'pointer', display:'flex', alignItems:'center' }}>
+            {isDark ? <Sun size={16} style={{ color:'#f59e0b' }} /> : <Moon size={16} style={{ color:'var(--text-secondary)' }} />}
           </button>
         </div>
       </nav>
 
-      {/* Main Content */}
-      <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 lg:px-8 py-8 z-10">
-        <div className="grid lg:grid-cols-12 gap-8">
+      {/* Main */}
+      <main style={{ flex:1, maxWidth:'1200px', margin:'0 auto', width:'100%', padding:'2rem 1.5rem', position:'relative', zIndex:10 }}>
+        <div style={{ display:'grid', gridTemplateColumns:'minmax(0,320px) 1fr', gap:'1.5rem' }}>
 
-          {/* Sidebar */}
-          <div className="lg:col-span-4 xl:col-span-3 space-y-6">
+          {/* ── Sidebar ── */}
+          <aside style={{ display:'flex', flexDirection:'column', gap:'1rem' }}>
 
-            {/* Search Controls */}
-            <div className={`p-6 rounded-2xl backdrop-blur-xl border ${themeClasses.cardBg} shadow-sm`}>
-              <div className="space-y-4">
-                {/* Textbook Select */}
+            {/* Controls */}
+            <div style={S.card}>
+              <h2 style={{ fontSize:'0.72rem', fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--text-muted)', marginBottom:'1rem', margin:'0 0 1rem' }}>Ask Your Textbook</h2>
+              <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
                 <div>
-                  <label className={`text-xs font-semibold uppercase tracking-wider ${themeClasses.textMuted} mb-2 block`}>Textbook</label>
-                  <select
-                    value={selectedTextbook}
-                    onChange={(e) => setSelectedTextbook(e.target.value)}
-                    className={`w-full px-3 py-2 rounded-lg text-sm outline-none transition-all ${themeClasses.inputBg} ${themeClasses.text}`}
-                  >
-                    {availableTextbooks.map((textbook) => (
-                      <option key={textbook.id} value={textbook.id} className="text-black">
-                        {textbook.name}
-                      </option>
-                    ))}
+                  <label style={S.label}>Textbook</label>
+                  <select value={selectedTextbook} onChange={e => setSelectedTextbook(e.target.value)} style={S.select}>
+                    {availableTextbooks.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
                   </select>
                 </div>
 
-                {/* Search Input */}
-                <div className="relative">
-                  <input
-                    type="text"
+                <div>
+                  <label style={S.label}>Question</label>
+                  <textarea
                     value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    onKeyPress={(e) => e.key === 'Enter' && handleSearch(e)}
-                    placeholder="Ask a question..."
-                    className={`w-full pl-10 pr-4 py-3 rounded-xl outline-none transition-all ${themeClasses.inputBg} ${themeClasses.text}`}
+                    onChange={e => setQuery(e.target.value)}
+                    onKeyDown={e => e.key === 'Enter' && !e.shiftKey && handleSearch(e)}
+                    placeholder="Ask anything… (Enter to send)"
+                    rows={3}
+                    style={S.textarea}
                   />
-                  <Bot className={`absolute left-3 top-1/2 -translate-y-1/2 ${themeClasses.textMuted}`} size={18} />
                 </div>
 
-                <button
-                  onClick={handleSearch}
-                  disabled={loading || !query.trim()}
-                  className={`w-full py-3 rounded-xl font-medium text-white transition-all active:scale-95 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex justify-center items-center gap-2`}
-                >
-                  {loading ? <RefreshCw className="animate-spin" size={18} /> : <Sparkles size={18} />}
-                  <span>Generate Answer</span>
+                <button onClick={handleSearch} disabled={loading || !query.trim()} className="ll-btn-accent"
+                  style={{ width:'100%', padding:'10px', fontSize:'0.875rem', borderRadius:'10px', display:'flex', alignItems:'center', justifyContent:'center', gap:'7px' }}>
+                  {loading ? <RefreshCw size={15} style={{ animation:'spin 0.8s linear infinite' }} /> : <Sparkles size={15} />}
+                  {loading ? 'Analyzing…' : 'Generate Answer'}
                 </button>
               </div>
             </div>
 
-            {/* Suggestions */}
-            {(!searchAttempted || (answer && !loading)) && (
-              <div className={`p-6 rounded-2xl backdrop-blur-xl border ${themeClasses.cardBg} shadow-sm`}>
-                <div className="flex items-center gap-2 mb-4">
-                  <Lightbulb className="text-yellow-500" size={18} />
-                  <h3 className={`font-semibold ${themeClasses.text}`}>Try asking...</h3>
+            {/* History */}
+            {history.length > 0 && (
+              <div style={S.card}>
+                <div style={{ display:'flex', alignItems:'center', gap:'7px', marginBottom:'10px' }}>
+                  <Clock size={13} style={{ color:'var(--accent-1)' }} />
+                  <h3 style={{ fontSize:'0.72rem', fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--text-muted)', margin:0 }}>Recent</h3>
                 </div>
-                <div className="space-y-2">
-                  {getCurrentAnswerSuggestions().map((suggestion, index) => (
-                    <button
-                      key={index}
-                      onClick={() => handleSuggestionClick(suggestion)}
-                      className={`w-full text-left px-3 py-2 text-sm rounded-lg transition-colors hover:bg-blue-500/10 ${themeClasses.textSecondary} hover:${themeClasses.text}`}
-                    >
-                      {suggestion}
+                {history.map((h, i) => (
+                  <button key={i} onClick={() => handleSuggestion(h.query)}
+                    style={{ width:'100%', textAlign:'left', padding:'6px 10px', borderRadius:'8px', border:'none', background:'transparent', color:'var(--text-secondary)', fontSize:'0.8rem', cursor:'pointer', overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', transition:'background 0.15s' }}
+                    onMouseEnter={e => e.currentTarget.style.background = 'var(--bg-elevated)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'transparent'}>
+                    {h.query}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Suggestions */}
+            {(!searched || answer) && (
+              <div style={S.card}>
+                <div style={{ display:'flex', alignItems:'center', gap:'7px', marginBottom:'10px' }}>
+                  <Lightbulb size={13} style={{ color:'var(--warm-1)' }} />
+                  <h3 style={{ fontSize:'0.72rem', fontWeight:700, textTransform:'uppercase', letterSpacing:'0.07em', color:'var(--text-muted)', margin:0 }}>Try asking…</h3>
+                </div>
+                {currentSuggestions.map((s, i) => (
+                  <button key={i} onClick={() => handleSuggestion(s)}
+                    style={{ width:'100%', textAlign:'left', padding:'7px 10px', borderRadius:'8px', border:'none', background:'transparent', color:'var(--text-secondary)', fontSize:'0.83rem', cursor:'pointer', lineHeight:1.4, transition:'background 0.15s, color 0.15s' }}
+                    onMouseEnter={e => { e.currentTarget.style.background='var(--accent-glow)'; e.currentTarget.style.color='var(--accent-1)'; }}
+                    onMouseLeave={e => { e.currentTarget.style.background='transparent'; e.currentTarget.style.color='var(--text-secondary)'; }}>
+                    {s}
+                  </button>
+                ))}
+              </div>
+            )}
+          </aside>
+
+          {/* ── Answer Area ── */}
+          <div style={{ display:'flex', flexDirection:'column', gap:'1rem' }}>
+
+            {/* Error */}
+            {error && (
+              <div className="animate-fade-in-up" style={{ padding:'1.25rem', borderRadius:'14px', border:'1px solid rgba(220,38,38,0.2)', background:'rgba(220,38,38,0.05)' }}>
+                <div style={{ display:'flex', alignItems:'center', gap:'8px', color:'#dc2626', marginBottom:'4px' }}>
+                  <AlertCircle size={16} /><strong style={{ fontSize:'0.9rem' }}>Generation Failed</strong>
+                </div>
+                <p style={{ fontSize:'0.85rem', color:'var(--text-secondary)', margin:0 }}>{error}</p>
+              </div>
+            )}
+
+            {/* Skeleton */}
+            {loading && <Skeleton />}
+
+            {/* Answer card */}
+            {!loading && answer?.answer && (
+              <div className="animate-fade-in-up" style={{ background:'var(--bg-surface)', border:'1px solid var(--border-base)', borderRadius:'18px', overflow:'hidden', boxShadow:'var(--shadow-md)' }}>
+
+                {/* Card header */}
+                <div style={{ padding:'1.25rem 1.5rem', borderBottom:'1px solid var(--border-subtle)', background: isDark ? 'linear-gradient(135deg, rgba(64,145,108,0.08) 0%, rgba(82,183,136,0.04) 100%)' : 'linear-gradient(135deg, rgba(64,145,108,0.06) 0%, rgba(82,183,136,0.02) 100%)' }}>
+                  <div style={{ display:'flex', alignItems:'flex-start', justifyContent:'space-between', gap:'1rem' }}>
+                    <div style={{ display:'flex', alignItems:'center', gap:'12px' }}>
+                      <div style={{ padding:'10px', background:'var(--accent-1)', borderRadius:'12px', boxShadow:'0 4px 16px var(--accent-glow)', flexShrink:0 }}>
+                        <Brain size={18} color="#fff" />
+                      </div>
+                      <div>
+                        <h2 style={{ fontWeight:700, fontSize:'1rem', color:'var(--text-primary)', margin:0 }}>AI Analysis</h2>
+                        <p style={{ fontSize:'0.75rem', color:'var(--text-muted)', margin:'3px 0 0' }}>
+                          {answer.chunks_processed || 0} source{answer.chunks_processed !== 1 ? 's' : ''} · {answer.duration || '—'}
+                        </p>
+                      </div>
+                    </div>
+                    <button onClick={handleCopy} title="Copy answer"
+                      style={{ padding:'7px', borderRadius:'9px', border:'1px solid var(--border-base)', background:'var(--bg-elevated)', cursor:'pointer', display:'flex', alignItems:'center', flexShrink:0 }}>
+                      {copied ? <CheckCircle size={16} style={{ color:'var(--accent-1)' }} /> : <Copy size={16} style={{ color:'var(--text-muted)' }} />}
                     </button>
+                  </div>
+
+                  {/* Badges */}
+                  <div style={{ display:'flex', flexWrap:'wrap', gap:'6px', marginTop:'12px' }}>
+                    <ConfidenceBadge confidence={answer.confidence} />
+                    <ModelBadge apiUsed={answer.api_used} model={answer.model} />
+                    <RetrievalBadge mode={answer.retrieval_mode} />
+                  </div>
+                </div>
+
+                {/* Markdown body */}
+                <div style={{ padding:'1.5rem 1.75rem' }}>
+                  <div className="prose-answer">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{answer.answer}</ReactMarkdown>
+                  </div>
+                </div>
+
+                {/* Sources — always visible below the answer */}
+                {answer.search_results?.length > 0 && (
+                  <div style={{ marginTop:'1.5rem' }}>
+                    {/* Divider + header */}
+                    <div style={{ display:'flex', alignItems:'center', gap:'10px', marginBottom:'1rem', paddingTop:'1rem', borderTop:'1px solid var(--border-subtle)' }}>
+                      <div style={{ padding:'6px', background:'var(--accent-glow)', border:'1px solid rgba(82,183,136,0.25)', borderRadius:'8px' }}>
+                        <BookOpen size={14} style={{ color:'var(--accent-1)' }} />
+                      </div>
+                      <div>
+                        <h3 style={{ fontSize:'0.85rem', fontWeight:700, color:'var(--text-primary)', margin:0 }}>Retrieved Source Chunks</h3>
+                        <p style={{ fontSize:'0.72rem', color:'var(--text-muted)', margin:0 }}>{answer.search_results.length} chunks · reranked by ms-marco cross-encoder · hybrid BM25+FAISS retrieval</p>
+                      </div>
+                    </div>
+
+                    <div style={{ display:'flex', flexDirection:'column', gap:'10px' }}>
+                      {answer.search_results.map((chunk, i) => (
+                        <div key={i} style={{ padding:'1rem', borderRadius:'12px', background:'var(--bg-elevated)', border:'1px solid var(--border-base)' }}>
+                          {/* Chunk header */}
+                          <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom:'10px' }}>
+                            <div style={{ display:'flex', alignItems:'center', gap:'8px' }}>
+                              <span style={{ width:'24px', height:'24px', borderRadius:'50%', background:'var(--accent-glow)', border:'1px solid rgba(82,183,136,0.3)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:'0.72rem', fontWeight:700, color:'var(--accent-1)', flexShrink:0 }}>
+                                {i + 1}
+                              </span>
+                              <span style={{ fontSize:'0.72rem', fontFamily:'monospace', color:'var(--text-muted)', background:'var(--bg-surface)', padding:'2px 7px', borderRadius:'5px', border:'1px solid var(--border-subtle)' }}>chunk #{chunk.chunk_id}</span>
+                              <span style={{ fontSize:'0.72rem', color:'var(--text-muted)' }}>{chunk.word_count || '—'} words</span>
+                            </div>
+                            {chunk.score > 0 && (
+                              <div style={{ display:'flex', alignItems:'center', gap:'8px' }}>
+                                <div className="score-bar" style={{ width:'64px' }}>
+                                  <div className="score-bar-fill" style={{ width:`${Math.min(100, chunk.score * 100)}%` }} />
+                                </div>
+                                <span style={{ fontSize:'0.72rem', color:'var(--accent-1)', fontWeight:600, minWidth:'36px', textAlign:'right' }}>
+                                  {Math.round(chunk.score * 100)}%
+                                </span>
+                              </div>
+                            )}
+                          </div>
+                          {/* Chunk text */}
+                          <p style={{ fontSize:'0.84rem', lineHeight:1.7, color:'var(--text-secondary)', margin:0, fontStyle:'normal' }}>
+                            {chunk.preview}
+                          </p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Empty state */}
+            {!searched && !loading && (
+              <div className="animate-fade-in-up" style={{ display:'flex', flexDirection:'column', alignItems:'center', padding:'5rem 1rem', textAlign:'center', opacity:0.65 }}>
+                <div style={{ padding:'1.5rem', borderRadius:'20px', background:'var(--bg-surface)', border:'1px solid var(--border-base)', marginBottom:'1.25rem' }}>
+                  <Bot size={44} style={{ color:'var(--text-muted)' }} />
+                </div>
+                <h3 style={{ fontSize:'1.1rem', fontWeight:700, color:'var(--text-primary)', marginBottom:'0.5rem' }}>Ready to Analyze</h3>
+                <p style={{ fontSize:'0.875rem', color:'var(--text-secondary)', maxWidth:'380px', lineHeight:1.65, marginBottom:'2rem' }}>
+                  Ask any question — the AI retrieves the most relevant textbook sections and synthesizes a comprehensive answer.
+                </p>
+
+                {/* Pipeline feature cards */}
+                <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:'12px', width:'100%', maxWidth:'520px' }}>
+                  {[
+                    { icon:<Layers size={16}/>, label:'Hybrid Retrieval', desc:'BM25 + FAISS + RRF' },
+                    { icon:<Brain size={16}/>, label:'Reranking', desc:'ms-marco MiniLM L-12' },
+                    { icon:<Zap size={16}/>, label:'Groq LLM', desc:'Llama 3.3 70B · ~500 tok/s' },
+                  ].map((f, i) => (
+                    <div key={i} style={{ padding:'0.9rem', borderRadius:'12px', background:'var(--bg-surface)', border:'1px solid var(--border-base)', textAlign:'center' }}>
+                      <div style={{ color:'var(--accent-1)', marginBottom:'6px', display:'flex', justifyContent:'center' }}>{f.icon}</div>
+                      <p style={{ fontSize:'0.72rem', fontWeight:700, color:'var(--text-primary)', margin:'0 0 2px' }}>{f.label}</p>
+                      <p style={{ fontSize:'0.68rem', color:'var(--text-muted)', margin:0 }}>{f.desc}</p>
+                    </div>
                   ))}
                 </div>
               </div>
             )}
           </div>
-
-          {/* Main Answer Area */}
-          <div className="lg:col-span-8 xl:col-span-9">
-
-            {/* Search Status */}
-            {searchAttempted && !loading && !error && answer && (
-              <div className="flex items-center justify-between mb-6 px-2">
-                <div className="flex items-center gap-2">
-                  <Sparkles className="text-purple-500" size={16} />
-                  <span className={`text-sm ${themeClasses.textSecondary}`}>
-                    AI Answer for "<span className={`font-bold ${themeClasses.text}`}>{query}</span>"
-                  </span>
-                </div>
-                {answer.timing && (
-                  <div className={`flex items-center gap-1 text-xs ${themeClasses.textMuted}`}>
-                    <Clock size={12} />
-                    <span>{formatDuration(answer.timing.total_duration)}</span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Error */}
-            {error && (
-              <div className={`p-6 rounded-2xl border border-red-500/20 bg-red-500/5 mb-6`}>
-                <div className="flex items-center gap-3 text-red-500 mb-2">
-                  <AlertCircle size={20} />
-                  <h3 className="font-semibold">Generation Failed</h3>
-                </div>
-                <p className={`text-sm ${themeClasses.textSecondary}`}>{error}</p>
-              </div>
-            )}
-
-            {/* Loading */}
-            {loading && (
-              <div className="flex flex-col items-center justify-center py-20">
-                <div className="relative w-16 h-16 mb-6">
-                  <div className="absolute inset-0 rounded-full border-4 border-purple-500/20"></div>
-                  <div className="absolute inset-0 rounded-full border-4 border-purple-500 border-t-transparent animate-spin"></div>
-                </div>
-                <p className={`${themeClasses.textSecondary} animate-pulse`}>Analyzing textbook content...</p>
-              </div>
-            )}
-
-            {/* Answer Display */}
-            {answer && answer.answer && (
-              <div className={`rounded-2xl backdrop-blur-sm border overflow-hidden mb-6 ${themeClasses.cardBg} ${themeClasses.border}`}>
-                {/* Header */}
-                <div className={`p-6 border-b ${themeClasses.border} ${themeClasses.answerBg}`}>
-                  <div className="flex items-start justify-between">
-                    <div className="flex items-center gap-4">
-                      <div className="p-3 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl shadow-lg shadow-purple-500/20">
-                        <Bot className="text-white" size={24} />
-                      </div>
-                      <div>
-                        <h2 className={`text-xl font-bold ${themeClasses.text}`}>AI Analysis</h2>
-                        <div className={`flex items-center gap-2 text-sm ${themeClasses.textMuted}`}>
-                          <span>Based on {answer.chunks_processed || 0} sources</span>
-                        </div>
-                      </div>
-                    </div>
-                    <button
-                      onClick={handleCopyAnswer}
-                      className={`p-2 rounded-lg transition-all ${isDark ? 'hover:bg-white/10' : 'hover:bg-black/5'}`}
-                      title="Copy answer"
-                    >
-                      {copied ? <CheckCircle className="text-green-500" size={20} /> : <Copy className={themeClasses.textMuted} size={20} />}
-                    </button>
-                  </div>
-                </div>
-
-                {/* Content */}
-                <div className="p-8">
-                  <div className={`prose max-w-none ${isDark ? 'prose-invert' : ''}`}>
-                    <div className={`whitespace-pre-wrap leading-relaxed text-base lg:text-lg ${themeClasses.text}`}>
-                      {answer.answer}
-                    </div>
-                  </div>
-                </div>
-
-                {/* Sources Toggle */}
-                {answer.search_results && answer.search_results.length > 0 && (
-                  <div className={`border-t ${themeClasses.border}`}>
-                    <button
-                      onClick={() => setShowSources(!showSources)}
-                      className={`w-full p-4 flex items-center justify-between transition-colors ${isDark ? 'hover:bg-white/5' : 'hover:bg-black/5'}`}
-                    >
-                      <div className={`flex items-center gap-2 text-sm font-medium ${themeClasses.textSecondary}`}>
-                        <BookOpen size={16} />
-                        <span>View Source Material</span>
-                      </div>
-                      {showSources ? <ChevronUp size={16} className={themeClasses.textMuted} /> : <ChevronDown size={16} className={themeClasses.textMuted} />}
-                    </button>
-
-                    {showSources && (
-                      <div className={`p-4 space-y-3 ${isDark ? 'bg-black/20' : 'bg-gray-50/50'}`}>
-                        {answer.search_results.map((chunk, index) => (
-                          <div key={index} className={`p-4 rounded-xl border ${themeClasses.cardBg} ${themeClasses.border}`}>
-                            <div className="flex items-center justify-between mb-2">
-                              <div className="flex items-center gap-2">
-                                <span className={`flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold ${isDark ? 'bg-blue-900/50 text-blue-200' : 'bg-blue-100 text-blue-700'}`}>
-                                  {index + 1}
-                                </span>
-                                <span className={`text-xs font-mono ${themeClasses.textMuted}`}>ID: {chunk.chunk_id}</span>
-                              </div>
-                              {chunk.score && (
-                                <span className={`text-xs px-2 py-1 rounded-full ${isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-700'}`}>
-                                  {Math.round(chunk.score * 100)}% match
-                                </span>
-                              )}
-                            </div>
-                            <p className={`text-sm leading-relaxed ${themeClasses.textSecondary}`}>
-                              {chunk.preview}
-                            </p>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Empty State */}
-            {!searchAttempted && !loading && (
-              <div className="flex flex-col items-center justify-center py-20 text-center opacity-50">
-                <Bot size={64} className={`mb-6 ${themeClasses.textMuted}`} />
-                <h3 className={`text-xl font-semibold mb-2 ${themeClasses.text}`}>Ready to Analyze</h3>
-                <p className={`max-w-md ${themeClasses.textSecondary}`}>
-                  Ask any question about your textbook. AI will analyze the content and provide a comprehensive answer with citations.
-                </p>
-              </div>
-            )}
-
-          </div>
         </div>
       </main>
+
+      <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
     </div>
   );
 };

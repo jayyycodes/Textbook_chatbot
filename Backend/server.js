@@ -1,26 +1,19 @@
 const express = require('express');
 const cors = require('cors');
-const { spawn } = require('child_process');
-const path = require('path');
-const fs = require('fs');
+const http = require('http');
 
 const app = express();
 
-// Textbook configuration
-const TEXTBOOK_CONFIG = {
-    'intro_ml': {
-        name: 'Introduction to Machine Learning',
-        description: 'ML algorithms and concepts'
-    },
-    'Computer_Networks': {
-        name: 'Computer Networks',
-        description: 'Computer networking fundamentals'
-    },
-    'economics': {
-        name: 'Economics',
-        description: 'Economic principles and theories'
-    }
-};
+// =========================================================================
+// CONFIGURATION
+// =========================================================================
+
+// FastAPI backend URL (persistent Python RAG server)
+const FASTAPI_URL = process.env.FASTAPI_URL || 'http://127.0.0.1:8000';
+
+// =========================================================================
+// MIDDLEWARE
+// =========================================================================
 
 // CORS configuration
 app.use(cors({
@@ -42,215 +35,107 @@ app.use((req, res, next) => {
     next();
 });
 
-// Cache for Python command
-let workingPythonCommand = null;
+// =========================================================================
+// HELPER: Proxy to FastAPI
+// =========================================================================
 
 /**
- * Find working Python command
+ * Forward a request to the FastAPI backend and return the response.
+ * @param {string} method - HTTP method ('GET' or 'POST')
+ * @param {string} path - Path on the FastAPI server (e.g., '/search')
+ * @param {object|null} body - Request body for POST requests
+ * @returns {Promise<{statusCode: number, data: object}>}
  */
-async function findWorkingPythonCommand() {
-    if (workingPythonCommand) {
-        return workingPythonCommand;
-    }
-
-    // Prioritize virtual environment
-    const venvPython = path.join(__dirname, '.venv', 'Scripts', 'python.exe');
-    const pythonCommands = [venvPython, 'python', 'python3', 'py'];
-
-    for (const command of pythonCommands) {
-        try {
-            // Skip if file path doesn't exist (for absolute paths)
-            if (path.isAbsolute(command) && !fs.existsSync(command)) {
-                continue;
-            }
-
-            const result = await new Promise((resolve) => {
-                const process = spawn(command, ['--version'], { timeout: 3000 });
-                process.on('close', (code) => resolve(code === 0));
-                process.on('error', () => resolve(false));
-            });
-
-            if (result) {
-                workingPythonCommand = command;
-                console.log(`[INFO] Using Python command: ${command}`);
-                return command;
-            }
-        } catch (error) {
-            continue;
-        }
-    }
-
-    console.error(`[ERROR] No working Python found`);
-    return null;
-}
-
-/**
- * Find search_faiss.py script path
- */
-function findScriptPath() {
-    const possiblePaths = [
-        path.join(__dirname, 'embeddings', 'search_faiss.py'),
-        path.join(__dirname, 'search_faiss.py')
-    ];
-
-    for (const scriptPath of possiblePaths) {
-        if (fs.existsSync(scriptPath)) {
-            console.log(`[INFO] Found script at: ${scriptPath}`);
-            return scriptPath;
-        }
-    }
-
-    console.error(`[ERROR] search_faiss.py not found`);
-    return null;
-}
-
-/**
- * Execute search_faiss.py with given mode
- */
-async function executeSearch(pythonCommand, scriptPath, textbook, query, mode = 'raw') {
-    const args = [
-        scriptPath,
-        'query',
-        '--id', textbook,
-        '--question', query.trim(),
-        '--mode', mode
-    ];
-
-    console.log(`[DEBUG] Executing: ${pythonCommand} ${args.join(' ')}`);
-
-    const pythonProcess = spawn(pythonCommand, args, {
-        cwd: path.dirname(scriptPath),
-        env: {
-            ...process.env,
-            PYTHONUNBUFFERED: '1',
-            PYTHONIOENCODING: 'utf-8'
-        },
-        timeout: 180000  // 3 minutes timeout
-    });
-
-    let stdout = '';
-    let stderr = '';
-
-    pythonProcess.stdout.on('data', (data) => {
-        stdout += data.toString();
-    });
-
-    pythonProcess.stderr.on('data', (data) => {
-        stderr += data.toString();
-    });
-
+function proxyToFastAPI(method, path, body = null) {
     return new Promise((resolve, reject) => {
-        pythonProcess.on('close', (code) => {
-            console.log(`[DEBUG] Python exit code: ${code}`);
-            console.log(`[DEBUG] Python stdout length: ${stdout.length}`);
+        const url = new URL(path, FASTAPI_URL);
+        
+        const options = {
+            hostname: url.hostname,
+            port: url.port,
+            path: url.pathname,
+            method: method,
+            headers: {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json',
+            },
+            timeout: 120000, // 2 minute timeout
+        };
 
-            if (code === 0) {
-                resolve({ success: true, output: stdout, stderr });
-            } else {
-                reject({ success: false, code, stderr: stderr.trim(), stdout: stdout.trim() });
-            }
+        const req = http.request(options, (res) => {
+            let data = '';
+            res.on('data', (chunk) => data += chunk);
+            res.on('end', () => {
+                try {
+                    const parsed = JSON.parse(data);
+                    resolve({ statusCode: res.statusCode, data: parsed });
+                } catch (e) {
+                    resolve({ statusCode: res.statusCode, data: { raw: data } });
+                }
+            });
         });
 
-        pythonProcess.on('error', (error) => {
-            reject({ success: false, error: error.message });
+        req.on('error', (error) => {
+            reject(error);
         });
+
+        req.on('timeout', () => {
+            req.destroy();
+            reject(new Error('Request to FastAPI timed out'));
+        });
+
+        if (body) {
+            req.write(JSON.stringify(body));
+        }
+
+        req.end();
     });
 }
 
+// =========================================================================
+// ROUTES
+// =========================================================================
+
 /**
- * Parse the search_faiss.py output format
+ * GET /health — Health check (proxied to FastAPI)
  */
-function parseSearchOutput(output, textbook, query) {
+app.get('/health', async (req, res) => {
     try {
-        const lines = output.split('\n');
-        let bookRelevance = null;
-        let confidence = null;
-        let chunksUsed = 0;
-        let chunkIds = [];
-        let bestRerankScore = null;
-        let answerStarted = false;
-        let answerLines = [];
-
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i];
-
-            if (line.includes('BOOK RELEVANCE:')) {
-                bookRelevance = parseFloat(line.split(':')[1].trim());
-            } else if (line.includes('CONFIDENCE:')) {
-                confidence = line.split(':')[1].trim();
-            } else if (line.includes('CHUNKS USED:')) {
-                chunksUsed = parseInt(line.split(':')[1].trim());
-            } else if (line.includes('CHUNK_IDS:')) {
-                try {
-                    const idsStr = line.split('CHUNK_IDS:')[1].trim();
-                    chunkIds = JSON.parse(idsStr);
-                } catch (e) {
-                    console.log('[WARN] Could not parse chunk IDs:', line);
-                    chunkIds = [];
-                }
-            } else if (line.includes('BEST RERANK SCORE:')) {
-                bestRerankScore = parseFloat(line.split(':')[1].trim());
-            } else if (line.includes('ANSWER:')) {
-                answerStarted = true;
-            } else if (answerStarted && line.includes('----------------------------------------------------------------------')) {
-                if (answerLines.length === 0) continue; // Skip first separator
-                else break; // Stop at second separator
-            } else if (answerStarted) {
-                answerLines.push(line);
-            }
-        }
-
-        const answer = answerLines.join('\n').trim();
-
-        // Check if it's an error message
-        if (answer.includes('The textbook does not contain relevant information')) {
-            return {
-                error: 'Not Relevant',
-                message: answer,
-                book_relevance: bookRelevance,
-                textbook: textbook,
-                query: query,
-                results: []
-            };
-        }
-
-        // Parse evidence chunks from answer (for RAW mode)
-        const evidencePattern = /\[Evidence (\d+) - Chunk ID: ([^\]]+)\]\s+([\s\S]*?)(?=\[Evidence|\n\n$|$)/g;
-        const results = [];
-        let match;
-
-        while ((match = evidencePattern.exec(answer)) !== null) {
-            results.push({
-                rank: parseInt(match[1]),
-                chunk_id: match[2],
-                content: match[3].trim(),
-                word_count: match[3].trim().split(' ').length
-            });
-        }
-
-        return {
-            query: query,
-            textbook: textbook,
-            textbook_name: TEXTBOOK_CONFIG[textbook]?.name || textbook,
-            book_relevance: bookRelevance,
-            confidence: confidence,
-            best_rerank_score: bestRerankScore,
-            chunks_used: chunksUsed,
-            chunk_ids: chunkIds,
-            total_results: results.length,
-            results: results,
-            answer: answer  // Full answer (structured for RAW, rewritten for LLM)
-        };
+        const result = await proxyToFastAPI('GET', '/health');
+        res.status(result.statusCode).json({
+            ...result.data,
+            proxy: 'node.js',
+            fastapi_url: FASTAPI_URL,
+        });
     } catch (error) {
-        console.error('[ERROR] Failed to parse output:', error.message);
-        console.error('[DEBUG] Output was:', output.substring(0, 500));
-        throw new Error(`Parse error: ${error.message}`);
+        res.status(503).json({
+            status: 'unhealthy',
+            error: 'FastAPI backend is not reachable',
+            message: error.message,
+            fastapi_url: FASTAPI_URL,
+            hint: 'Start the FastAPI server: cd embeddings && python api_server.py',
+        });
     }
-}
+});
 
 /**
- * POST /search - Semantic search using search_faiss.py (RAW mode)
- * Returns evidence chunks without LLM rewriting
+ * GET /textbooks — List available textbooks (proxied to FastAPI)
+ */
+app.get('/textbooks', async (req, res) => {
+    try {
+        const result = await proxyToFastAPI('GET', '/textbooks');
+        res.status(result.statusCode).json(result.data);
+    } catch (error) {
+        console.error(`[${new Date().toISOString()}] /textbooks failed:`, error.message);
+        res.status(503).json({
+            error: 'FastAPI backend not available',
+            message: error.message,
+        });
+    }
+});
+
+/**
+ * POST /search — Semantic search (RAW mode, proxied to FastAPI)
  */
 app.post('/search', async (req, res) => {
     const startTime = Date.now();
@@ -266,61 +151,34 @@ app.post('/search', async (req, res) => {
             });
         }
 
-        // Map textbook values
-        const textbookMapping = {
-            'computer_networks': 'Computer_Networks',
-            'ml': 'intro_ml',
-            'machine_learning': 'intro_ml',
-            'intro_to_ml': 'intro_ml',
-            'economics': 'economics'
-        };
+        console.log(`[${new Date().toISOString()}] Search: "${query.substring(0, 50)}..." in ${textbook || 'default'}`);
 
-        const selectedTextbook = textbookMapping[textbook?.toLowerCase()] || textbook || 'intro_ml';
+        const result = await proxyToFastAPI('POST', '/search', {
+            query: query.trim(),
+            textbook: textbook || 'intro_ml',
+            top_k: top_k || 5,
+        });
 
-        console.log(`[${new Date().toISOString()}] Search (RAW): "${query.substring(0, 50)}..." in ${selectedTextbook}`);
+        const duration = Date.now() - startTime;
+        console.log(`[${new Date().toISOString()}] Search completed in ${duration}ms`);
 
-        const scriptPath = findScriptPath();
-        if (!scriptPath) {
-            return res.status(500).json({
-                error: 'Configuration Error',
-                message: 'Search script not found'
-            });
-        }
-
-        const pythonCommand = await findWorkingPythonCommand();
-        if (!pythonCommand) {
-            return res.status(500).json({
-                error: 'Python Not Available',
-                message: 'No working Python installation found'
-            });
-        }
-
-        // Execute search in RAW mode
-        const result = await executeSearch(pythonCommand, scriptPath, selectedTextbook, query, 'raw');
-
-        // Parse output
-        const parsedResult = parseSearchOutput(result.output, selectedTextbook, query);
-        parsedResult.duration = `${Date.now() - startTime}ms`;
-
-        console.log(`[${new Date().toISOString()}] Search completed in ${parsedResult.duration}`);
-        res.status(200).json(parsedResult);
+        res.status(result.statusCode).json(result.data);
 
     } catch (error) {
         const duration = Date.now() - startTime;
-        console.error(`[${new Date().toISOString()}] Search failed after ${duration}ms:`, error);
+        console.error(`[${new Date().toISOString()}] Search failed after ${duration}ms:`, error.message);
 
         res.status(500).json({
             error: 'Search Failed',
-            message: error.message || 'An unexpected error occurred',
-            textbook: req.body.textbook,
-            duration: `${duration}ms`
+            message: error.message || 'FastAPI backend not available',
+            duration: `${duration}ms`,
+            hint: 'Ensure FastAPI is running: cd embeddings && python api_server.py',
         });
     }
 });
 
 /**
- * POST /search/answer - Generate LLM answer using search_faiss.py (LLM mode)
- * Uses built-in LLM generation from search_faiss.py
+ * POST /search/answer — LLM-enhanced answer (proxied to FastAPI)
  */
 app.post('/search/answer', async (req, res) => {
     const startTime = Date.now();
@@ -336,76 +194,34 @@ app.post('/search/answer', async (req, res) => {
             });
         }
 
-        // Map textbook
-        const textbookMapping = {
-            'computer_networks': 'Computer_Networks',
-            'ml': 'intro_ml',
-            'machine_learning': 'intro_ml',
-            'intro_to_ml': 'intro_ml',
-            'economics': 'economics'
-        };
+        console.log(`[${new Date().toISOString()}] LLM Answer: "${query.substring(0, 50)}..." in ${textbook || 'default'}`);
 
-        const selectedTextbook = textbookMapping[textbook?.toLowerCase()] || textbook || 'intro_ml';
+        const result = await proxyToFastAPI('POST', '/search/answer', {
+            query: query.trim(),
+            textbook: textbook || 'intro_ml',
+        });
 
-        console.log(`[${new Date().toISOString()}] LLM Answer: "${query.substring(0, 50)}..." in ${selectedTextbook}`);
+        const duration = Date.now() - startTime;
+        console.log(`[${new Date().toISOString()}] LLM Answer completed in ${duration}ms`);
 
-        const scriptPath = findScriptPath();
-        if (!scriptPath) {
-            return res.status(500).json({
-                error: 'Configuration Error',
-                message: 'Search script not found'
-            });
-        }
-
-        const pythonCommand = await findWorkingPythonCommand();
-        if (!pythonCommand) {
-            return res.status(500).json({
-                error: 'Python Not Available'
-            });
-        }
-
-        // Execute search in LLM mode - this calls llm_answer.py internally
-        const result = await executeSearch(pythonCommand, scriptPath, selectedTextbook, query, 'llm');
-
-        // Parse output
-        const parsedResult = parseSearchOutput(result.output, selectedTextbook, query);
-        parsedResult.duration = `${Date.now() - startTime}ms`;
-        parsedResult.mode = 'llm';
-
-        console.log(`[${new Date().toISOString()}] LLM Answer completed in ${parsedResult.duration}`);
-        res.status(200).json(parsedResult);
+        res.status(result.statusCode).json(result.data);
 
     } catch (error) {
         const duration = Date.now() - startTime;
-        console.error(`[${new Date().toISOString()}] LLM Answer failed:`, error);
-
-        if (error.stderr) {
-            console.error('[DEBUG] Script Stderr:', error.stderr);
-        }
+        console.error(`[${new Date().toISOString()}] LLM Answer failed:`, error.message);
 
         res.status(500).json({
             error: 'LLM Answer Failed',
-            message: error.message || 'Failed to generate answer',
-            query: req.body.query,
-            duration: `${duration}ms`
+            message: error.message || 'FastAPI backend not available',
+            duration: `${duration}ms`,
+            hint: 'Ensure FastAPI is running: cd embeddings && python api_server.py',
         });
     }
 });
 
-/**
- * GET /health - Health check
- */
-app.get('/health', async (req, res) => {
-    const scriptPath = findScriptPath();
-    const pythonCommand = await findWorkingPythonCommand();
-
-    res.status(200).json({
-        status: scriptPath && pythonCommand ? 'healthy' : 'unhealthy',
-        script_found: !!scriptPath,
-        python_available: !!pythonCommand,
-        timestamp: new Date().toISOString()
-    });
-});
+// =========================================================================
+// ERROR HANDLING
+// =========================================================================
 
 // Error handling middleware
 app.use((err, req, res, next) => {
@@ -416,19 +232,32 @@ app.use((err, req, res, next) => {
     });
 });
 
-// Start server
+// =========================================================================
+// START SERVER
+// =========================================================================
+
 const PORT = process.env.PORT || 5000;
 const server = app.listen(PORT, '0.0.0.0', () => {
-    console.log(`🚀 Textbook Chatbot API running on port ${PORT}`);
+    console.log(`🚀 LearnLens API Gateway running on port ${PORT}`);
+    console.log(`🔗 Proxying to FastAPI: ${FASTAPI_URL}`);
     console.log(`📍 Search (RAW): POST http://localhost:${PORT}/search`);
-    console.log(`🤖 LLM Answer: POST http://localhost:${PORT}/search/answer`);
-    console.log(`❤️ Health: GET http://localhost:${PORT}/health`);
+    console.log(`🤖 LLM Answer:   POST http://localhost:${PORT}/search/answer`);
+    console.log(`📚 Textbooks:     GET  http://localhost:${PORT}/textbooks`);
+    console.log(`❤️  Health:        GET  http://localhost:${PORT}/health`);
 
-    // Initial validation
+    // Check FastAPI connectivity on startup
     setTimeout(async () => {
-        const scriptPath = findScriptPath();
-        const pythonCommand = await findWorkingPythonCommand();
-        console.log(scriptPath && pythonCommand ? '✅ System ready' : '❌ System validation failed');
+        try {
+            const result = await proxyToFastAPI('GET', '/health');
+            if (result.data.status === 'healthy') {
+                console.log(`✅ FastAPI backend is healthy (${result.data.textbooks_loaded} textbooks loaded)`);
+            } else {
+                console.log(`⚠️  FastAPI backend status: ${result.data.status}`);
+            }
+        } catch (error) {
+            console.log(`❌ FastAPI backend not reachable at ${FASTAPI_URL}`);
+            console.log(`   Start it with: cd embeddings && python api_server.py`);
+        }
     }, 1000);
 });
 

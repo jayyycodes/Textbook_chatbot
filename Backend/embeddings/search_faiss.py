@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-search_faiss.py - Complete Single-File RAG Pipeline with Junk Filtering & Relevance Gate
-A production-ready textbook Q&A system with chunking, FAISS indexing, 
-cross-encoder reranking, junk filtering, book relevance check, and dual-mode answer generation (RAW/LLM).
+search_faiss.py - Production RAG Pipeline
+Features: Hybrid BM25+FAISS retrieval, HNSW index, cross-encoder reranking,
+junk filtering, book relevance gate, offline-first model loading, query cache.
+
+Interview highlights:
+  - BAAI/bge-large-en-v1.5 (1024-dim, best open-source academic embeddings)
+  - Hybrid dense+sparse retrieval via Reciprocal Rank Fusion
+  - HNSW approximate search (log-linear vs linear for FlatIP)
+  - Cross-encoder reranking separates retrieval from relevance scoring
 
 Usage:
-    # Index a PDF
     python search_faiss.py index --pdf textbook.pdf --id intro_to_ml --name "Intro to ML"
-    
-    # Query in RAW mode (direct chunk evidence)
-    python search_faiss.py query --id intro_to_ml --question "What is supervised learning?" --mode raw
-    
-    # Query in LLM mode (rewritten answer)
-    python search_faiss.py query --id intro_to_ml --question "What is supervised learning?" --mode llm
+    python search_faiss.py query --id intro_to_ml --question "What is supervised learning?"
 """
 
 import os
@@ -23,11 +23,16 @@ import pickle
 import logging
 import argparse
 import subprocess
+import functools
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass, asdict
 
 import numpy as np
+
+# Prefer offline/cached models to avoid startup network failures
+os.environ.setdefault('TRANSFORMERS_OFFLINE', '0')  # allow download but cache aggressively
+os.environ.setdefault('HF_HUB_DISABLE_PROGRESS_BARS', '1')
 
 # Core dependencies
 try:
@@ -84,17 +89,18 @@ logger = logging.getLogger(__name__)
 # CONFIGURATION
 # =============================================================================
 
-# Heavy embedding models (in order of preference)
+# Embedding models (priority order)
+# bge-large-en-v1.5: Outperforms E5 and MPNet on BEIR benchmark for academic text
 EMBEDDING_MODELS = [
-    "BAAI/bge-large-en-v1.5",  # 1024-dim, excellent for academic content
+    "BAAI/bge-large-en-v1.5",              # 1024-dim, top academic retrieval
     "sentence-transformers/all-mpnet-base-v2",  # 768-dim fallback
 ]
 
-# Heavy reranking models (in order of preference)
+# Reranker models (priority order)
+# Cross-encoders score query+passage jointly → much better than bi-encoder for final ranking
 RERANKER_MODELS = [
-    "cross-encoder/ms-marco-MiniLM-L-12-v2",  # Fast and good
-    "BAAI/bge-reranker-base",  # Good quality
-    "mixedbread-ai/mxbai-rerank-large-v1",  # Best quality but slow
+    "cross-encoder/ms-marco-MiniLM-L-12-v2",   # Fast, strong on passage ranking
+    "BAAI/bge-reranker-base",                   # Good quality fallback
 ]
 
 # LLM models for answer generation (optional)
@@ -110,8 +116,8 @@ MIN_CHUNK_WORDS = 80  # Minimum words for valid chunk
 
 # Retrieval parameters
 TOP_K_FAISS = 20
-TOP_K_RERANK = 5
-RERANK_THRESHOLD = 0.60  # Increased to filter out TOC
+TOP_K_RERANK = 3
+RERANK_THRESHOLD = 0.05  # ms-marco-MiniLM outputs low scores (0.1-0.3 for good matches)
 BOOK_RELEVANCE_THRESHOLD = 0.40  # Book-level relevance gate
 
 # Directories
@@ -368,14 +374,20 @@ class EmbeddingIndexer:
         for model in models_to_try:
             try:
                 logger.info(f"Loading embedding model: {model}")
-                self.model = SentenceTransformer(model, device=device)
+                # Try loading from local cache first (avoids HuggingFace network check)
+                try:
+                    self.model = SentenceTransformer(model, device=device, local_files_only=True)
+                    logger.info(f"  (loaded from local cache)")
+                except Exception:
+                    # Cache miss — download from HuggingFace
+                    self.model = SentenceTransformer(model, device=device)
                 self.model_name = model
                 self.embedding_dim = self.model.get_sentence_embedding_dimension()
                 logger.info(f"✓ Loaded {model} (dim={self.embedding_dim})")
                 break
             except Exception as e:
                 logger.warning(f"Failed to load {model}: {e}")
-        
+
         if self.model is None:
             raise RuntimeError("Could not load any embedding model")
     
@@ -411,8 +423,14 @@ class EmbeddingIndexer:
         centroid = centroid.astype('float32')
         logger.info(f"✓ Centroid computed: shape {centroid.shape}")
         
-        logger.info(f"Building FAISS index (dim={embeddings.shape[1]})...")
-        index = faiss.IndexFlatIP(embeddings.shape[1])
+        dim = embeddings.shape[1]
+        logger.info(f"Building FAISS HNSW index (dim={dim}, M=32)...")
+        # IndexHNSWFlat: Hierarchical Navigable Small World graph
+        # M=32 connections per node — good balance of speed vs recall
+        # ~10-100x faster than IndexFlatIP at query time, ~5% recall loss
+        index = faiss.IndexHNSWFlat(dim, 32)
+        index.hnsw.efConstruction = 200  # Higher = better index quality
+        index.hnsw.efSearch = 64         # Higher = better recall at query time
         index.add(embeddings)
         
         # Save index
@@ -483,13 +501,17 @@ class CrossEncoderReranker:
         for model in models_to_try:
             try:
                 logger.info(f"Loading reranker: {model}")
-                self.model = CrossEncoder(model, device=device)
+                try:
+                    self.model = CrossEncoder(model, device=device, local_files_only=True)
+                    logger.info(f"  (loaded from local cache)")
+                except Exception:
+                    self.model = CrossEncoder(model, device=device)
                 self.model_name = model
                 logger.info(f"✓ Loaded {model}")
                 break
             except Exception as e:
                 logger.warning(f"Failed to load {model}: {e}")
-        
+
         if self.model is None:
             raise RuntimeError("Could not load any reranker model")
     
@@ -516,9 +538,8 @@ class CrossEncoderReranker:
         logger.info(f"Reranking {len(pairs)} results...")
         scores = self.model.predict(pairs, show_progress_bar=False)
         
-        # Apply sigmoid if scores are logits (MS-MARCO style)
-        if np.mean(np.abs(scores)) > 5:  # Likely logits
-            scores = sigmoid(scores)
+        # Apply sigmoid to convert raw logits to probabilities
+        scores = sigmoid(scores)
         
         # Add scores to results
         for result, score in zip(results, scores):
@@ -723,8 +744,30 @@ class SearchPipeline:
             model_name=self.config['model_name'],
             device=device
         )
-        
         self.reranker = CrossEncoderReranker(device=device)
+
+        # Initialize Hybrid Retriever (BM25 + FAISS + RRF)
+        try:
+            from hybrid_retriever import HybridRetriever, load_bm25_index, build_bm25_index
+            bm25_path = INDICES_DIR / f"{textbook_id}_bm25_index.pkl"
+            bm25 = load_bm25_index(bm25_path)
+            if bm25 is None:
+                logger.info("Building BM25 index (first-time setup)...")
+                bm25 = build_bm25_index(self.metadata, bm25_path)
+            self.retriever = HybridRetriever(
+                faiss_index=self.index,
+                metadata=self.metadata,
+                embedder=self.embedder,
+                bm25=bm25
+            )
+            self._use_hybrid = True
+        except Exception as e:
+            logger.warning(f"Hybrid retriever unavailable ({e}), using dense-only")
+            self.retriever = None
+            self._use_hybrid = False
+
+        # Query cache: (question, mode) -> result dict
+        self._cache: Dict[str, dict] = {}
     
     def check_book_relevance(self, query_embedding: np.ndarray) -> float:
         """
@@ -741,53 +784,49 @@ class SearchPipeline:
     
     def search(self, query: str, top_k: int = TOP_K_FAISS) -> Tuple[List[Dict], np.ndarray]:
         """
-        Search for relevant chunks.
-        
-        Args:
-            query: Search query
-            top_k: Number of results from FAISS
-            
+        Search for relevant chunks using Hybrid (BM25+FAISS+RRF) or dense-only FAISS.
+
         Returns:
             Tuple of (results list, query_embedding)
         """
         if not query.strip():
             return [], None
-        
-        # Encode query
+
         logger.info(f"Searching: '{query}'")
         query_embedding = self.embedder.encode([query], show_progress=False)
-        
-        # Search FAISS
-        scores, indices = self.index.search(query_embedding, top_k)
-        
-        # Prepare results
-        results = []
-        for score, idx in zip(scores[0], indices[0]):
-            if idx < len(self.metadata):
-                chunk = self.metadata[idx]
-                results.append({
-                    'chunk_id': chunk['chunk_id'],
-                    'text': chunk['text'],
-                    'word_count': chunk['word_count'],
-                    'faiss_score': float(score)
-                })
-        
-        logger.info(f"✓ Found {len(results)} results from FAISS")
-        
+
+        if self._use_hybrid and self.retriever:
+            results = self.retriever.retrieve(query, query_embedding, top_k=top_k)
+        else:
+            # Dense-only fallback
+            scores, indices = self.index.search(query_embedding, top_k)
+            results = []
+            for score, idx in zip(scores[0], indices[0]):
+                if idx < len(self.metadata):
+                    chunk = self.metadata[idx]
+                    results.append({
+                        'chunk_id': chunk['chunk_id'],
+                        'text': chunk['text'],
+                        'word_count': chunk.get('word_count', len(chunk['text'].split())),
+                        'faiss_score': float(score)
+                    })
+            logger.info(f"✓ Found {len(results)} results (dense-only FAISS)")
+
         return results, query_embedding
     
     def query(self, question: str, mode: str = 'raw') -> Dict:
         """
-        Complete query pipeline with relevance gating.
-        
-        Args:
-            question: User question
-            mode: 'raw' or 'llm'
-            
-        Returns:
-            Dictionary with answer and metadata
+        Complete query pipeline: hybrid retrieval → junk filter → rerank → answer.
+
+        Cached: identical (question, mode) pairs return instantly.
         """
-        # Search
+        # Check cache
+        cache_key = f"{mode}::{question.strip().lower()}"
+        if cache_key in self._cache:
+            logger.info(f"Cache hit for query: '{question[:50]}'")
+            return self._cache[cache_key]
+
+        # Search (hybrid or dense)
         results, query_embedding = self.search(question, top_k=TOP_K_FAISS)
         
         # Check book-level relevance FIRST
@@ -853,10 +892,10 @@ class SearchPipeline:
                 'confidence': 'Low'
             }
         
-        # Classify confidence
-        if best_rerank_score >= 0.75:
+        # Classify confidence (calibrated for ms-marco-MiniLM score range 0.0-0.3)
+        if best_rerank_score >= 0.15:
             confidence = 'High'
-        elif best_rerank_score >= 0.65:
+        elif best_rerank_score >= 0.08:
             confidence = 'Medium'
         else:
             confidence = 'Low'
@@ -866,10 +905,11 @@ class SearchPipeline:
         generator = AnswerGenerator(use_llm=use_llm)
         answer = generator.generate(reranked, question, use_llm=use_llm)
         
-        # Extract chunk IDs
+        # Extract chunk IDs and rerank scores
         chunk_ids = [r['chunk_id'] for r in reranked]
+        rerank_scores = {r['chunk_id']: r.get('rerank_score', 0) for r in reranked}
         
-        return {
+        result = {
             'answer': answer,
             'textbook_name': self.config['textbook_name'],
             'question': question,
@@ -877,9 +917,19 @@ class SearchPipeline:
             'book_relevance': book_relevance,
             'chunks_used': len(reranked),
             'chunk_ids': chunk_ids,
+            'rerank_scores': rerank_scores,
             'best_rerank_score': best_rerank_score,
-            'confidence': confidence
+            'confidence': confidence,
+            'retrieval_mode': 'hybrid' if self._use_hybrid else 'dense',
         }
+
+        # Cache result (cap cache at 200 entries)
+        if len(self._cache) >= 200:
+            oldest = next(iter(self._cache))
+            del self._cache[oldest]
+        self._cache[cache_key] = result
+
+        return result
 
 
 # =============================================================================
